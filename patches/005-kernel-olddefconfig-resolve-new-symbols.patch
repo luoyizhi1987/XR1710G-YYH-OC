@@ -1,0 +1,43 @@
+From: XR1710G-YYH-OC Builder <builder@xr1710g.local>
+Date: 2026-07-13
+Subject: [PATCH] kernel-defaults: run olddefconfig to resolve NEW kernel symbols
+
+When CONFIG_ALL_KMODS=y is set, OpenWrt enables building every kmod
+package, including drivers whose sub-options are NEW in the current
+kernel version (e.g. IXGBE_IPSEC in Linux 6.18).  The kernel config
+merge in Kernel/Configure/Default concatenates config fragments and
+package overrides into .config.set, then copies it verbatim to .config
+without running olddefconfig.  When the kernel build later invokes
+syncconfig, it encounters (NEW) symbols that have no answer in .config
+and aborts with:
+
+  IPSec XFRM cryptography-offload acceleration (IXGBE_IPSEC) [Y/n/?] (NEW)
+  make[8]: *** [scripts/kconfig/Makefile:85: syncconfig] Error 1
+  ERROR: target/linux failed to build.
+
+Fix: run $(KERNEL_MAKE) olddefconfig after .config is written so that
+every NEW symbol is silently set to its default value.  Copy the
+resolved .config back to .config.set so that .vermagic is computed on
+the final, resolved configuration.  olddefconfig never changes existing
+symbol values -- it only fills in defaults for symbols that are absent
+-- so no functionality is lost.
+
+This is a build-system fix, not a feature reduction: all selected
+packages, kmods and patches remain exactly as before.
+---
+--- a/include/kernel-defaults.mk	2026-07-13 10:30:31.010173814 +0000
++++ b/include/kernel-defaults.mk	2026-07-13 10:30:31.042174012 +0000
+@@ -125,6 +125,13 @@
+ 		cp $(LINUX_DIR)/.config.set $(LINUX_DIR)/.config; \
+ 		cp $(LINUX_DIR)/.config.set $(LINUX_DIR)/.config.prev; \
+ 	}
++	# Resolve NEW kernel config symbols (e.g. IXGBE_IPSEC) that appear
++	# when CONFIG_ALL_KMODS pulls in drivers whose sub-options are new
++	# in this kernel version.  Without olddefconfig, syncconfig aborts
++	# on (NEW) prompts in non-interactive mode.
++	$(KERNEL_MAKE) olddefconfig
++	cp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.set
++	cp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.prev
+ 	$(_SINGLE) [ -d $(LINUX_DIR)/user_headers ] || $(KERNEL_MAKE) $(if $(findstring uml,$(BOARD)),ARCH=$(ARCH)) INSTALL_HDR_PATH=$(LINUX_DIR)/user_headers headers_install
+ 	grep '=[ym]' $(LINUX_DIR)/.config.set | LC_ALL=C sort | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
+ endef

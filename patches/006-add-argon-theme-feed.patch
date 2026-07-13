@@ -1,0 +1,27 @@
+From: XR1710G-YYH-OC Builder <builder@xr1710g.local>
+Date: 2026-07-13
+Subject: [PATCH] feeds: add luci-theme-argon feed
+
+The OC overlay enables luci-theme-argon (patch 003 adds it to the
+device DEFAULT_PACKAGES and the config seed selects it), but the
+official OpenWrt feeds do not ship a third-party Argon theme.
+
+Add jerrykuku/luci-theme-argon as a dedicated feed so that
+`./scripts/feeds update -a` + `./scripts/feeds install -a` makes the
+package visible to `make defconfig`.  The repo contains only the single
+luci-theme-argon package (no other packages, no conflicts with stock
+feeds).
+
+The theme Makefile includes $(TOPDIR)/feeds/luci/luci.mk, which is
+already available after the luci feed is updated, so no extra
+preparation is needed.
+---
+--- a/feeds.conf.default
++++ b/feeds.conf.default
+@@ -6,3 +6,4 @@
+ #src-git targets https://github.com/openwrt/targets.git
+ #src-git oldpackages http://git.openwrt.org/packages.git
+ #src-link custom /usr/src/openwrt/custom-feed
++src-git argon https://github.com/jerrykuku/luci-theme-argon.git
+-- 
+2.43.0

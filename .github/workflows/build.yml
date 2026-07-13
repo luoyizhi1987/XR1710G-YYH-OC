@@ -28,6 +28,10 @@ env:
   BUILD_DOMAIN: "xr1710g-yyh-oc"
   MAKE_JOBS: "4"
 
+# contents:write is required for creating GitHub Releases.
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Full build
@@ -152,7 +156,7 @@ jobs:
       # ------------------------------------------------------------------
       - name: Build toolchain
         run: |
-          set -eux
+          set -euxo pipefail
           cd openwrt
           make -j"${MAKE_JOBS}" tools/install -j"${MAKE_JOBS}" V=s 2>&1 | tee toolchain-tools.log
           make -j"${MAKE_JOBS}" toolchain/install -j"${MAKE_JOBS}" V=s 2>&1 | tee toolchain-install.log
@@ -166,9 +170,10 @@ jobs:
       # ------------------------------------------------------------------
       - name: Build target (full)
         run: |
-          set -eux
+          set -euxo pipefail
           cd openwrt
           # Full build: target + all packages
+          # pipefail ensures a `make` failure is not masked by `tee`.
           make -j"${MAKE_JOBS}" V=s 2>&1 | tee build.log || {
             echo "=== first build pass failed, retrying with -j1 for clearer error ==="
             make -j1 V=s 2>&1 | tee -a build.log
@@ -211,3 +216,59 @@ jobs:
           path: artifacts/
           if-no-files-found: warn
           retention-days: 30
+
+      # ------------------------------------------------------------------
+      # 12. Publish firmware to GitHub Releases (only on successful build).
+      # ------------------------------------------------------------------
+      - name: Publish to GitHub Releases
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euxo pipefail
+          cd openwrt
+          # Collect firmware images and manifest
+          mkdir -p release-assets
+          # sysupgrade / factory / initramfs images for XR1710G
+          cp -v bin/targets/airoha/an7581/*xr1710g*.itb release-assets/ 2>/dev/null || true
+          cp -v bin/targets/airoha/an7581/*xr1710g*.bin release-assets/ 2>/dev/null || true
+          # Manifest (package list for the image)
+          cp -v bin/targets/airoha/an7581/*.manifest release-assets/ 2>/dev/null || true
+          # Full .config snapshot
+          cp -v .config release-assets/full.config 2>/dev/null || true
+          # Build info
+          {
+            echo "## XR1710G-YYH-OC Firmware"
+            echo ""
+            echo "- **Build date:** $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo "- **Upstream:** ${UPSTREAM_REPO} (branch ${UPSTREAM_BRANCH})"
+            echo "- **Upstream commit:** ${UPSTREAM_COMMIT}"
+            echo "- **Overlay commit:** ${GITHUB_SHA}"
+            echo "- **GitHub Actions run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo ""
+            echo "### Features"
+            echo "- 30 dBm 5GHz UNII-1 txpower patch"
+            echo "- 200 MHz OC + performance governor"
+            echo "- Argon theme (replaces default Glass theme)"
+            echo "- UPnP, v2ray-geoip, v2ray-geosite"
+            echo "- BPF / eBPF / XDP / cgroup-BPF kernel support"
+            echo "- CONFIG_ALL + CONFIG_ALL_KMODS (all packages built)"
+            echo ""
+            echo "### Install"
+            echo "Upload the \`*.itb\` sysupgrade image via LuCI → System → Backup / Flash Firmware."
+          } > release-assets/RELEASE_NOTES.md
+          echo "=== Release assets ==="
+          ls -la release-assets/
+          # Verify at least one firmware image exists
+          if ! ls release-assets/*.itb release-assets/*.bin 2>/dev/null | grep -q .; then
+            echo "ERROR: No firmware image found in bin/targets/airoha/an7581/"
+            ls -la bin/targets/airoha/an7581/ || true
+            exit 1
+          fi
+          # Create tag and release
+          TAG="xr1710g-yyh-oc-$(date -u '+%Y%m%d-%H%M%S')"
+          gh release create "${TAG}" release-assets/* \
+            --title "XR1710G-YYH-OC $(date -u '+%Y-%m-%d %H:%M')" \
+            --notes-file release-assets/RELEASE_NOTES.md \
+            --repo "${GITHUB_REPOSITORY}"
+          echo "=== Release created: ${TAG} ==="
