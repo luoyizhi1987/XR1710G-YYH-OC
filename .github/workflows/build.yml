@@ -1,0 +1,213 @@
+name: Build XR1710G YYH OC firmware
+
+# Manual trigger only, as requested by the user.
+# Each run pulls the latest YYH2913/openwrt xr1710g-6.18-integration
+# tree, applies the OC + 30dBm + theme + package overlay patches,
+# then runs a full OpenWrt build.
+on:
+  workflow_dispatch:
+    inputs:
+      clean_cache:
+        description: "Wipe ccache and tmp/ before building (slower, fully clean)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+# Cancel any in-flight run for the same ref when a new run is dispatched.
+concurrency:
+  group: xr1710g-yyh-oc-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: "https://github.com/YYH2913/openwrt.git"
+  UPSTREAM_BRANCH: "xr1710g-6.18-integration"
+  BUILD_USER: "builder"
+  BUILD_DOMAIN: "xr1710g-yyh-oc"
+  MAKE_JOBS: "4"
+
+jobs:
+  build:
+    name: Full build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 720
+
+    steps:
+      # ------------------------------------------------------------------
+      # 0. Free disk space on the runner (OpenWrt builds need ~30 GB free).
+      # ------------------------------------------------------------------
+      - name: Free runner disk space
+        run: |
+          set -eux
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/share/powershell \
+                      /usr/local/share/chrom* /usr/local/share/ripgrep \
+                      /usr/local/share/vcpkg /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h /
+
+      # ------------------------------------------------------------------
+      # 1. Checkout this overlay repo (patches + config + workflow).
+      # ------------------------------------------------------------------
+      - name: Checkout overlay repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ------------------------------------------------------------------
+      # 2. Install build dependencies (matches OpenWrt buildbot setup).
+      # ------------------------------------------------------------------
+      - name: Install build dependencies
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3-distutils python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget curl ca-certificates \
+            python3 python3-pip python3-venv libelf-dev libdw-dev \
+            subversion mercurial cvs asciidoc w3m docbook-xsl xsltproc \
+            automake autoconf libtool pkg-config cmake ninja-build \
+            aria2 jq time ccache
+          # Go is needed for v2ray-geoip / v2ray-geosite data packages.
+          # Install the version from apt; the build will fall back to a
+          # downloaded bootstrap if the host version is too old.
+          sudo apt-get install -y --no-install-recommends golang-go || true
+          go version || true
+          df -h /
+
+      # ------------------------------------------------------------------
+      # 3. Clone the upstream YYH2913/openwrt xr1710g-6.18-integration tree.
+      #    A full clone (no --depth) is used so that `git am` / `git apply`
+      #    have proper history to work with if needed.
+      # ------------------------------------------------------------------
+      - name: Clone upstream OpenWrt source
+        run: |
+          set -eux
+          git clone --branch "${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" openwrt
+          cd openwrt
+          git log -1 --format='Upstream HEAD: %H %s (%ci)'
+          echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # 4. Apply the overlay patches (30dBm txpower, OC, theme, packages).
+      # ------------------------------------------------------------------
+      - name: Apply overlay patches
+        run: |
+          set -eux
+          cd openwrt
+          ../scripts/apply-patches.sh "$PWD"
+
+      # ------------------------------------------------------------------
+      # 5. Seed .config from the overlay config file, then expand it.
+      # ------------------------------------------------------------------
+      - name: Seed and expand .config
+        run: |
+          set -eux
+          cd openwrt
+          # Copy the overlay config seed
+          cp ../config/xr1710g-oc.conf .config
+          # Make sure feeds.conf.default exists (it does in the upstream tree)
+          # and run scripts/feeds update + install so all packages referenced
+          # by .config are visible to make defconfig.
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # Run defconfig to expand the seed into a full .config
+          make defconfig
+          # Show the final config for the log
+          echo "=== final .config (target + package selection) ==="
+          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_luci|^CONFIG_PACKAGE_v2ray|^CONFIG_PACKAGE_miniupnpd|^CONFIG_PACKAGE_kmod-xdp|^CONFIG_KERNEL_DEBUG|^CONFIG_KERNEL_CGROUP|^CONFIG_KERNEL_BPF|^CONFIG_BPF_TOOLCHAIN|^CONFIG_KERNEL_XDP|^CONFIG_DEVEL|^CONFIG_CPU_FREQ_DEFAULT" .config || true
+
+      # ------------------------------------------------------------------
+      # 6. Optional: wipe ccache and tmp/ for a fully clean build.
+      # ------------------------------------------------------------------
+      - name: Wipe caches (optional)
+        if: github.event.inputs.clean_cache == 'true'
+        run: |
+          set -eux
+          cd openwrt
+          rm -rf tmp/ .ccache
+          ccache -C || true
+
+      # ------------------------------------------------------------------
+      # 7. Download all sources (dl/ tarballs). Use aria2c for speed.
+      # ------------------------------------------------------------------
+      - name: Download sources
+        run: |
+          set -eux
+          cd openwrt
+          # First pass: regular make download
+          make -j"${MAKE_JOBS}" download V=s 2>&1 | tee download.log || true
+          # Check for missing downloads and retry once
+          if grep -qiE "failed|error" download.log; then
+            echo "Retrying download for failed items..."
+            make -j1 download V=s 2>&1 | tee -a download.log || true
+          fi
+          df -h /
+
+      # ------------------------------------------------------------------
+      # 8. Build the toolchain first (this is the slow part).
+      # ------------------------------------------------------------------
+      - name: Build toolchain
+        run: |
+          set -eux
+          cd openwrt
+          make -j"${MAKE_JOBS}" tools/install -j"${MAKE_JOBS}" V=s 2>&1 | tee toolchain-tools.log
+          make -j"${MAKE_JOBS}" toolchain/install -j"${MAKE_JOBS}" V=s 2>&1 | tee toolchain-install.log
+          df -h /
+
+      # ------------------------------------------------------------------
+      # 9. Build the full target (kernel + rootfs + all packages).
+      #    This is the main build step. We use V=s for verbose output and
+      #    a generous timeout. If a single package fails, we retry once
+      #    with -j1 to get a clearer error.
+      # ------------------------------------------------------------------
+      - name: Build target (full)
+        run: |
+          set -eux
+          cd openwrt
+          # Full build: target + all packages
+          make -j"${MAKE_JOBS}" V=s 2>&1 | tee build.log || {
+            echo "=== first build pass failed, retrying with -j1 for clearer error ==="
+            make -j1 V=s 2>&1 | tee -a build.log
+          }
+          df -h /
+
+      # ------------------------------------------------------------------
+      # 10. Collect artifacts.
+      # ------------------------------------------------------------------
+      - name: Collect artifacts
+        if: always()
+        run: |
+          set -eux
+          mkdir -p artifacts
+          {
+            echo "Build date: $(date -u)"
+            echo "Upstream repo: ${UPSTREAM_REPO}"
+            echo "Upstream branch: ${UPSTREAM_BRANCH}"
+            echo "Upstream commit: ${UPSTREAM_COMMIT}"
+            echo "Overlay commit: ${GITHUB_SHA}"
+          } > artifacts/BUILD_INFO.txt
+          # Firmware images
+          if ls openwrt/bin/targets/airoha/an7581/*xr1710g* 2>/dev/null; then
+            cp -v openwrt/bin/targets/airoha/an7581/*xr1710g* artifacts/ 2>/dev/null || true
+          fi
+          # Manifest (package list)
+          cp -v openwrt/bin/targets/airoha/an7581/*.manifest artifacts/ 2>/dev/null || true
+          # Config snapshot
+          cp -v openwrt/.config artifacts/full.config 2>/dev/null || true
+          # Build log tail (useful if the upload step runs after a failure)
+          cp -v openwrt/build.log artifacts/ 2>/dev/null || true
+          cp -v openwrt/toolchain-install.log artifacts/ 2>/dev/null || true
+          ls -la artifacts/
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xr1710g-yyh-oc-firmware-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30

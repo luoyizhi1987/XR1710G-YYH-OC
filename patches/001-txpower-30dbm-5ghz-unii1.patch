@@ -1,0 +1,37 @@
+From: XR1710G-YYH-OC Builder <builder@xr1710g.local>
+Date: 2026-07-13
+Subject: [PATCH] wireless-regdb: raise US UNII-1 (5GHz ch36) to 30 dBm
+
+The upstream YYH2913 xr1710g-6.18-integration tree ships a local US
+regulatory override (520-w1700k-us-power-limits.patch) that raises the
+5 GHz UNII-1 rule (5150-5250 MHz, channels 36-48) from the stock 23 dBm
+to 29 dBm to approximate the W1700K / XR1710G AP grant.
+
+This patch overrides that value again, raising UNII-1 to 30 dBm so the
+5 GHz low channels (36-48) report and allow a 30 dBm (1 W) conducted
+power limit, matching the user's requested target.
+---
+--- a/package/firmware/wireless-regdb/patches/520-w1700k-us-power-limits.patch
++++ b/package/firmware/wireless-regdb/patches/520-w1700k-us-power-limits.patch
+@@ -6,7 +6,7 @@
+ 
+ - 2.4 GHz already uses 30 dBm, which is the nearest whole-dBm approximation
+   to the reported 29.5 dBm conducted limit, so leave it unchanged.
+-- Raise US UNII-1 from 23 dBm to 29 dBm to better match the W1700K AP grant.
++- Raise US UNII-1 from 23 dBm to 30 dBm to better match the W1700K AP grant.
+ - Raise US 6 GHz from 12 dBm to 29 dBm EIRP for Low Power Indoor operation.
+ 
+ Do not encode the higher AFC / Standard Power 6 GHz figures here. The current
+@@ -18,8 +18,8 @@
+ @@ -2041,15 +2041,15 @@ country US: DFS-FCC
+ -	# 5.15 ~ 5.25 GHz: 30 dBm for master mode, 23 dBm for clients
+ -	(5150 - 5250 @ 80), (23), AUTO-BW
+-+	# Local target: approximate the W1700K UNII-1 AP grant to 29 dBm
+-+	(5150 - 5250 @ 80), (29), AUTO-BW
+++	# Local target: XR1710G UNII-1 AP grant raised to 30 dBm
+++	(5150 - 5250 @ 80), (30), AUTO-BW
+  	(5250 - 5350 @ 80), (24), DFS, AUTO-BW
+  	# This range ends at 5725 MHz, but channel 144 extends to 5730 MHz.
+  	# Since 5725 ~ 5730 MHz belongs to the next range which has looser
+-- 
+2.43.0

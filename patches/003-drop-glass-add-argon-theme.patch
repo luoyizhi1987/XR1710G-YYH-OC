@@ -1,0 +1,39 @@
+From: XR1710G-YYH-OC Builder <builder@xr1710g.local>
+Date: 2026-07-13
+Subject: [PATCH] xr1710g: add Argon as default theme
+
+Add luci-theme-argon and luci-i18n-argon-zh-cn to the device package
+list, and ship a uci-defaults script that pins Argon as the default
+LuCI theme on first boot.
+---
+
+---
+--- a/target/linux/airoha/image/an7581.mk
++++ b/target/linux/airoha/image/an7581.mk
+@@ -145,6 +145,7 @@
+ 		    luci-i18n-mlo-zh-cn \
+ 		    luci-mod-admin-full \
+ 		    luci-proto-ppp luci-theme-bootstrap \
++		    luci-theme-argon luci-i18n-argon-zh-cn \
+ 		    rpcd-mod-rrdns uhttpd uhttpd-mod-ubus \
+ 		    wpad-basic-mbedtls
+   UBINIZE_OPTS := -E 5
+-- 
+2.43.0
+
+diff --git a/target/linux/airoha/an7581/base-files/etc/uci-defaults/18-xr1710g-argon-theme b/target/linux/airoha/an7581/base-files/etc/uci-defaults/18-xr1710g-argon-theme
+new file mode 100644
+--- /dev/null
++++ b/target/linux/airoha/an7581/base-files/etc/uci-defaults/18-xr1710g-argon-theme
+@@ -0,0 +1,9 @@
++#!/bin/sh
++
++[ "$(board_name)" = "econet,xr1710g-ubi" ] || exit 0
++
++uci set luci.main.mediaurlbase='/luci-static/argon'
++uci set luci.main.lang='zh_cn'
++uci commit luci
++
++exit 0
+-- 
+2.43.0

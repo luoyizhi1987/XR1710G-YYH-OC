@@ -1,0 +1,36 @@
+From: XR1710G-YYH-OC Builder <builder@xr1710g.local>
+Date: 2026-07-13
+Subject: [PATCH] xr1710g: add UPnP, v2ray-geoip/geosite and i18n packs
+
+Add the user-requested extra packages to the XR1710G device package
+list so they are pulled into the image by default:
+
+  * luci-app-upnp + luci-i18n-upnp-zh-cn
+    LuCI front-end for miniupnpd. The matching miniupnpd-nftables
+    backend is selected through .config.
+
+  * v2ray-geoip + v2ray-geosite
+    GeoIP database and geosite list used by v2ray-core / xray-core
+    based proxies. These are data-only packages (no LuCI page).
+---
+--- a/target/linux/airoha/image/an7581.mk
++++ b/target/linux/airoha/image/an7581.mk
+@@ -140,12 +140,15 @@
+ 		    kmod-i2c-an7581 kmod-hwmon-nct7802 \
+ 		    kmod-mt7996-firmware kmod-phy-realtek rtl826x-firmware \
+ 		    luci \
+-		    luci-app-firewall luci-app-mlo \
++		    luci-app-firewall luci-app-mlo  luci-app-upnp \
+ 		    luci-app-package-manager \
+ 		    luci-i18n-mlo-zh-cn \
++		    luci-i18n-upnp-zh-cn \
+ 		    luci-mod-admin-full \
+ 		    luci-proto-ppp luci-theme-bootstrap \
+ 		    luci-theme-argon luci-i18n-argon-zh-cn \
++		    v2ray-geoip \
++		    v2ray-geosite \
+ 		    rpcd-mod-rrdns uhttpd uhttpd-mod-ubus \
+ 		    wpad-basic-mbedtls
+   UBINIZE_OPTS := -E 5
+-- 
+2.43.0
