@@ -1,9 +1,5 @@
 name: Build XR1710G YYH OC firmware
 
-# Manual trigger only, as requested by the user.
-# Each run pulls the latest YYH2913/openwrt xr1710g-6.18-integration
-# tree, applies the OC + 30dBm + theme + package overlay patches,
-# then runs a full OpenWrt build.
 on:
   workflow_dispatch:
     inputs:
@@ -16,7 +12,6 @@ on:
           - "false"
           - "true"
 
-# Cancel any in-flight run for the same ref when a new run is dispatched.
 concurrency:
   group: xr1710g-yyh-oc-build
   cancel-in-progress: false
@@ -24,23 +19,20 @@ concurrency:
 env:
   UPSTREAM_REPO: "https://github.com/YYH2913/openwrt.git"
   UPSTREAM_BRANCH: "xr1710g-6.18-integration"
-  BUILD_USER: "builder"
-  BUILD_DOMAIN: "xr1710g-yyh-oc"
   MAKE_JOBS: "4"
 
-# contents:write is required for creating GitHub Releases.
 permissions:
   contents: write
 
 jobs:
   build:
     name: Full build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 720
+    runs-on: ubuntu-24.04
+    timeout-minutes: 600
 
     steps:
       # ------------------------------------------------------------------
-      # 0. Free disk space on the runner (OpenWrt builds need ~30 GB free).
+      # 0. Free disk space (OpenWrt builds need ~30 GB free).
       # ------------------------------------------------------------------
       - name: Free runner disk space
         run: |
@@ -53,7 +45,7 @@ jobs:
           df -h /
 
       # ------------------------------------------------------------------
-      # 1. Checkout this overlay repo (patches + config + workflow).
+      # 1. Checkout this overlay repo.
       # ------------------------------------------------------------------
       - name: Checkout overlay repository
         uses: actions/checkout@v4
@@ -61,7 +53,7 @@ jobs:
           fetch-depth: 1
 
       # ------------------------------------------------------------------
-      # 2. Install build dependencies (matches OpenWrt buildbot setup).
+      # 2. Install build dependencies (latest GCC on Ubuntu 24.04).
       # ------------------------------------------------------------------
       - name: Install build dependencies
         run: |
@@ -74,38 +66,58 @@ jobs:
             python3 python3-pip python3-venv libelf-dev libdw-dev \
             subversion mercurial cvs asciidoc w3m docbook-xsl xsltproc \
             automake autoconf libtool pkg-config cmake ninja-build \
-            aria2 jq time ccache
-          # Go is needed for v2ray-geoip / v2ray-geosite data packages.
-          # Install the version from apt; the build will fall back to a
-          # downloaded bootstrap if the host version is too old.
-          sudo apt-get install -y --no-install-recommends golang-go || true
-          go version || true
+            aria2 jq time ccache golang-go
+          gcc --version
           df -h /
 
       # ------------------------------------------------------------------
-      # 3. Clone the upstream YYH2913/openwrt xr1710g-6.18-integration tree.
-      #    A full clone (no --depth) is used so that `git am` / `git apply`
-      #    have proper history to work with if needed.
+      # 3. Restore ccache and dl/ caches for faster rebuilds.
+      # ------------------------------------------------------------------
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-${{ github.run_id }}
+          restore-keys: ccache-
+
+      - name: Restore dl cache
+        uses: actions/cache/restore@v4
+        with:
+          path: openwrt/dl
+          key: dlcache-${{ github.run_id }}
+          restore-keys: dlcache-
+
+      # ------------------------------------------------------------------
+      # 4. Clone upstream OpenWrt source.
       # ------------------------------------------------------------------
       - name: Clone upstream OpenWrt source
         run: |
           set -eux
-          git clone --branch "${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" openwrt
+          git clone --depth=1 --branch="${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" openwrt
           cd openwrt
           git log -1 --format='Upstream HEAD: %H %s (%ci)'
           echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
-      # 4. Apply the overlay patches (30dBm txpower, OC, theme, packages).
+      # 5. Apply overlay patches (30dBm, OC, theme, packages, olddefconfig, argon feed).
       # ------------------------------------------------------------------
       - name: Apply overlay patches
         run: |
           set -eux
           cd openwrt
           ../scripts/apply-patches.sh "$PWD"
+          # Verify olddefconfig patch was applied
+          echo "=== Verify olddefconfig patch ==="
+          grep -n "olddefconfig" include/kernel-defaults.mk || {
+            echo "ERROR: olddefconfig patch not applied! Applying via sed fallback..."
+            # Sed fallback: add olddefconfig after the .config.prev copy block
+            sed -i '/cp \$(LINUX_DIR)\/.config.set \$(LINUX_DIR)\/.config.prev/a\\t# Resolve NEW kernel config symbols (e.g. IXGBE_IPSEC)\n\t$(KERNEL_MAKE) olddefconfig\n\tcp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.set\n\tcp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.prev' include/kernel-defaults.mk
+            grep -n "olddefconfig" include/kernel-defaults.mk || { echo "FATAL: Cannot apply olddefconfig fix!"; exit 1; }
+          }
+          echo "olddefconfig patch verified OK"
 
       # ------------------------------------------------------------------
-      # 5. Seed .config from the overlay config file, then expand it.
+      # 6. Seed .config, update feeds (including argon), run defconfig.
       # ------------------------------------------------------------------
       - name: Seed and expand .config
         run: |
@@ -113,19 +125,17 @@ jobs:
           cd openwrt
           # Copy the overlay config seed
           cp ../config/xr1710g-oc.conf .config
-          # Make sure feeds.conf.default exists (it does in the upstream tree)
-          # and run scripts/feeds update + install so all packages referenced
-          # by .config are visible to make defconfig.
+          # Update and install all feeds (including argon feed from patch 006)
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           # Run defconfig to expand the seed into a full .config
           make defconfig
-          # Show the final config for the log
-          echo "=== final .config (target + package selection) ==="
-          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_luci|^CONFIG_PACKAGE_v2ray|^CONFIG_PACKAGE_miniupnpd|^CONFIG_PACKAGE_kmod-xdp|^CONFIG_KERNEL_DEBUG|^CONFIG_KERNEL_CGROUP|^CONFIG_KERNEL_BPF|^CONFIG_BPF_TOOLCHAIN|^CONFIG_KERNEL_XDP|^CONFIG_DEVEL|^CONFIG_CPU_FREQ_DEFAULT" .config || true
+          # Show key config selections for the log
+          echo "=== final .config (key selections) ==="
+          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_luci|^CONFIG_PACKAGE_v2ray|^CONFIG_PACKAGE_miniupnpd|^CONFIG_PACKAGE_kmod-xdp|^CONFIG_KERNEL_DEBUG|^CONFIG_KERNEL_CGROUP|^CONFIG_KERNEL_BPF|^CONFIG_BPF_TOOLCHAIN|^CONFIG_KERNEL_XDP|^CONFIG_DEVEL|^CONFIG_CPU_FREQ_DEFAULT|^CONFIG_ALL" .config || true
 
       # ------------------------------------------------------------------
-      # 6. Optional: wipe ccache and tmp/ for a fully clean build.
+      # 7. Optional: wipe ccache and tmp/ for a fully clean build.
       # ------------------------------------------------------------------
       - name: Wipe caches (optional)
         if: github.event.inputs.clean_cache == 'true'
@@ -136,52 +146,74 @@ jobs:
           ccache -C || true
 
       # ------------------------------------------------------------------
-      # 7. Download all sources (dl/ tarballs). Use aria2c for speed.
+      # 8. Configure ccache.
+      # ------------------------------------------------------------------
+      - name: Configure ccache
+        run: |
+          set -eux
+          mkdir -p "$GITHUB_WORKSPACE/.ccache"
+          cd openwrt
+          # Enable ccache in OpenWrt config
+          sed -i 's/# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/' .config
+          # Set ccache dir to the cached path
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          ccache -M 5G
+          ccache -z
+          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # 9. Download all sources (dl/ tarballs).
       # ------------------------------------------------------------------
       - name: Download sources
         run: |
-          set -eux
+          set -euxo pipefail
           cd openwrt
-          # First pass: regular make download
-          make -j"${MAKE_JOBS}" download V=s 2>&1 | tee download.log || true
-          # Check for missing downloads and retry once
-          if grep -qiE "failed|error" download.log; then
-            echo "Retrying download for failed items..."
-            make -j1 download V=s 2>&1 | tee -a download.log || true
-          fi
+          make -j"${MAKE_JOBS}" download V=s 2>&1 | tee download.log || {
+            echo "=== Retrying download with -j1 ==="
+            make -j1 download V=s 2>&1 | tee -a download.log
+          }
           df -h /
 
       # ------------------------------------------------------------------
-      # 8. Build the toolchain first (this is the slow part).
+      # 10. Build the toolchain (this is the slow part, ccache helps here).
       # ------------------------------------------------------------------
       - name: Build toolchain
         run: |
           set -euxo pipefail
           cd openwrt
-          make -j"${MAKE_JOBS}" tools/install -j"${MAKE_JOBS}" V=s 2>&1 | tee toolchain-tools.log
-          make -j"${MAKE_JOBS}" toolchain/install -j"${MAKE_JOBS}" V=s 2>&1 | tee toolchain-install.log
+          export FORCE_UNSAFE_CONFIGURE=1
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          make -j"${MAKE_JOBS}" tools/install V=s 2>&1 | tee toolchain-tools.log
+          make -j"${MAKE_JOBS}" toolchain/install V=s 2>&1 | tee toolchain-install.log
+          ccache -s
           df -h /
 
       # ------------------------------------------------------------------
-      # 9. Build the full target (kernel + rootfs + all packages).
-      #    This is the main build step. We use V=s for verbose output and
-      #    a generous timeout. If a single package fails, we retry once
-      #    with -j1 to get a clearer error.
+      # 11. Build the full target (kernel + rootfs + all packages).
+      #     Two-pass: V=c (concise) first for speed, V=s (verbose) on failure.
       # ------------------------------------------------------------------
       - name: Build target (full)
         run: |
           set -euxo pipefail
           cd openwrt
-          # Full build: target + all packages
-          # pipefail ensures a `make` failure is not masked by `tee`.
-          make -j"${MAKE_JOBS}" V=s 2>&1 | tee build.log || {
-            echo "=== first build pass failed, retrying with -j1 for clearer error ==="
+          export FORCE_UNSAFE_CONFIGURE=1
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
+          export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          # First pass: concise output for speed
+          make -j"${MAKE_JOBS}" V=c 2>&1 | tee build.log || {
+            echo "=== First pass failed, retrying with V=s for detailed error ==="
             make -j1 V=s 2>&1 | tee -a build.log
           }
+          ccache -s
           df -h /
 
       # ------------------------------------------------------------------
-      # 10. Collect artifacts.
+      # 12. Collect artifacts.
       # ------------------------------------------------------------------
       - name: Collect artifacts
         if: always()
@@ -203,11 +235,14 @@ jobs:
           cp -v openwrt/bin/targets/airoha/an7581/*.manifest artifacts/ 2>/dev/null || true
           # Config snapshot
           cp -v openwrt/.config artifacts/full.config 2>/dev/null || true
-          # Build log tail (useful if the upload step runs after a failure)
+          # Build log
           cp -v openwrt/build.log artifacts/ 2>/dev/null || true
           cp -v openwrt/toolchain-install.log artifacts/ 2>/dev/null || true
           ls -la artifacts/
 
+      # ------------------------------------------------------------------
+      # 13. Upload artifacts (always, even on failure).
+      # ------------------------------------------------------------------
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -218,7 +253,7 @@ jobs:
           retention-days: 30
 
       # ------------------------------------------------------------------
-      # 12. Publish firmware to GitHub Releases (only on successful build).
+      # 14. Publish firmware to GitHub Releases (only on success).
       # ------------------------------------------------------------------
       - name: Publish to GitHub Releases
         if: success()
@@ -227,7 +262,6 @@ jobs:
         run: |
           set -euxo pipefail
           cd openwrt
-          # Collect firmware images and manifest
           mkdir -p release-assets
           # sysupgrade / factory / initramfs images for XR1710G
           cp -v bin/targets/airoha/an7581/*xr1710g*.itb release-assets/ 2>/dev/null || true
@@ -253,6 +287,8 @@ jobs:
             echo "- UPnP, v2ray-geoip, v2ray-geosite"
             echo "- BPF / eBPF / XDP / cgroup-BPF kernel support"
             echo "- CONFIG_ALL + CONFIG_ALL_KMODS (all packages built)"
+            echo "- olddefconfig fix for NEW kernel symbols (IXGBE_IPSEC etc.)"
+            echo "- ccache accelerated build"
             echo ""
             echo "### Install"
             echo "Upload the \`*.itb\` sysupgrade image via LuCI → System → Backup / Flash Firmware."
@@ -272,3 +308,20 @@ jobs:
             --notes-file release-assets/RELEASE_NOTES.md \
             --repo "${GITHUB_REPOSITORY}"
           echo "=== Release created: ${TAG} ==="
+
+      # ------------------------------------------------------------------
+      # 15. Save caches (always, even on failure, for faster rebuilds).
+      # ------------------------------------------------------------------
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-${{ github.run_id }}
+
+      - name: Save dl cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: openwrt/dl
+          key: dlcache-${{ github.run_id }}

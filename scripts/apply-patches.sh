@@ -4,11 +4,6 @@
 # YYH2913/openwrt xr1710g-6.18-integration checkout.
 #
 # Usage:  apply-patches.sh <openwrt_source_root>
-#
-# The script is idempotent: if a patch has already been applied (git am
-# reports "already applied" or patch reports "Reversed (or previously applied)
-# patch detected"), it is skipped instead of failing. This lets the workflow
-# be re-run on the same checkout without manual cleanup.
 
 set -euo pipefail
 
@@ -33,28 +28,23 @@ failed=0
 for p in $(ls -1 "$PATCH_DIR"/*.patch 2>/dev/null | sort); do
     name=$(basename "$p")
     echo "--- applying $name"
-    # Try `patch -p1 --forward` first; --forward makes it skip already-applied
-    # patches instead of prompting. We also guard with a fallback to `git apply
-    # --3way` so that minor context drift can be resolved automatically.
-    if patch -p1 --forward --no-backup-if-mismatch --reject-file=/dev/null < "$p" 2>/dev/null; then
+    # Try patch -p1 --forward first; show errors if it fails
+    if patch -p1 --forward --no-backup-if-mismatch < "$p" 2>&1; then
         echo "    OK (patch)"
         applied=$((applied+1))
-    elif git apply --3way --whitespace=nowarn "$p" 2>/dev/null; then
+    elif git apply --3way --whitespace=nowarn "$p" 2>&1; then
         echo "    OK (git apply --3way)"
         applied=$((applied+1))
     else
-        # Final check: maybe the patch is already applied (patch --forward
-        # returns non-zero in that case too). Probe by trying to reverse it.
-        if patch -p1 --reverse --forward --no-backup-if-mismatch --reject-file=/dev/null < "$p" 2>/dev/null; then
+        # Maybe already applied
+        if patch -p1 --reverse --forward --no-backup-if-mismatch < "$p" >/dev/null 2>&1; then
             echo "    SKIP (already applied)"
             skipped=$((skipped+1))
-            # Re-apply forward to restore the patched state, since the reverse
-            # above actually un-did the change.
-            patch -p1 --forward --no-backup-if-mismatch --reject-file=/dev/null < "$p" 2>/dev/null || true
+            # Re-apply forward to restore the patched state
+            patch -p1 --forward --no-backup-if-mismatch < "$p" >/dev/null 2>&1 || true
         else
             echo "    FAIL"
             failed=$((failed+1))
-            # Print the patch header so the workflow log shows what failed.
             head -20 "$p" || true
         fi
     fi
