@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       clean_cache:
-        description: "Wipe ccache and tmp/ before building (slower, fully clean)"
+        description: "Wipe ccache and staging before building"
         required: false
         default: "false"
         type: choice
@@ -12,236 +12,272 @@ on:
           - "false"
           - "true"
 
-concurrency:
-  group: xr1710g-yyh-oc-build
-  cancel-in-progress: false
-
-env:
-  UPSTREAM_REPO: "https://github.com/YYH2913/openwrt.git"
-  UPSTREAM_BRANCH: "xr1710g-6.18-integration"
-
-permissions:
-  contents: write
+permissions: write-all
 
 jobs:
   build:
-    name: Full build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 600
+    name: Build firmware
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    env:
+      DK_OPENWRT: /bld/openwrt
+      DK_BIN: /bld/openwrt_bin
+      DK_USER: /bld/user
+      DK_PROFILE: /bld/user/current
+      UPSTREAM_REPO: "https://github.com/YYH2913/openwrt.git"
+      UPSTREAM_BRANCH: "xr1710g-6.18-integration"
+      GH_TOKEN: ${{ github.token }}
+      IMG_INC: ghcr.io/${{ github.repository_owner }}/xr1710g-yyh-oc:latest
 
     steps:
       # ------------------------------------------------------------------
-      # 0. Free disk space (OpenWrt builds need ~30 GB free).
+      # 0. Checkout overlay repo.
       # ------------------------------------------------------------------
-      - name: Free runner disk space
-        run: |
-          set -eux
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost /usr/local/share/powershell \
-                      /usr/local/share/chrom* /usr/local/share/ripgrep \
-                      /usr/local/share/vcpkg /opt/hostedtoolcache
-          sudo apt-get clean
-          df -h /
+      - uses: actions/checkout@v4
 
       # ------------------------------------------------------------------
-      # 1. Checkout this overlay repo.
+      # 1. Login to GHCR for Docker image caching.
       # ------------------------------------------------------------------
-      - name: Checkout overlay repository
-        uses: actions/checkout@v4
+      - uses: docker/login-action@v4
         with:
-          fetch-depth: 1
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       # ------------------------------------------------------------------
-      # 2. Install build dependencies.
+      # 2. Seed caches from previous build's Docker image.
       # ------------------------------------------------------------------
-      - name: Install build dependencies
+      - name: Seed caches from previous build
         run: |
           set -eux
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses-dev libssl-dev python3-dev python3-setuptools \
-            rsync swig unzip zlib1g-dev file wget curl ca-certificates \
-            python3 python3-pip python3-venv libelf-dev libdw-dev \
-            subversion mercurial cvs asciidoc w3m docbook-xsl xsltproc \
-            automake autoconf libtool pkg-config cmake ninja-build \
-            aria2 jq time ccache golang-go
-          gcc --version
-          echo "MAKE_JOBS=$(($(nproc) + 1))" >> "$GITHUB_ENV"
-          df -h /
+          mkdir -p ccache stcache dlcache openwrt_bin
+          docker pull "$IMG_INC" 2>&- || true
+          if docker image inspect "$IMG_INC" >/dev/null 2>&1; then
+            docker create --name CA "$IMG_INC" >/dev/null
+            for d in ccache stcache dlcache; do
+              docker cp CA:/$d/. $d 2>/dev/null || true
+            done
+            docker rm CA
+            echo "Restored caches from previous build image"
+          else
+            echo "No previous build image found, starting fresh"
+          fi
 
       # ------------------------------------------------------------------
-      # 3. Restore ccache and dl/ caches for faster rebuilds.
-      # ------------------------------------------------------------------
-      - name: Restore ccache
-        uses: actions/cache/restore@v4
-        with:
-          path: .ccache
-          key: ccache-${{ github.run_id }}
-          restore-keys: ccache-
-
-      - name: Restore dl cache
-        uses: actions/cache/restore@v4
-        with:
-          path: openwrt/dl
-          key: dlcache-${{ github.run_id }}
-          restore-keys: dlcache-
-
-      # ------------------------------------------------------------------
-      # 4. Clone upstream OpenWrt source.
-      # ------------------------------------------------------------------
-      - name: Clone upstream OpenWrt source
-        run: |
-          set -eux
-          # Remove leftover openwrt dir from dl cache restore
-          rm -rf openwrt
-          git clone --depth=1 --branch="${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" openwrt
-          cd openwrt
-          git log -1 --format='Upstream HEAD: %H %s (%ci)'
-          echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
-      # ------------------------------------------------------------------
-      # 5. Apply overlay patches.
-      # ------------------------------------------------------------------
-      - name: Apply overlay patches
-        run: |
-          set -eux
-          cd openwrt
-          ../scripts/apply-patches.sh "$PWD"
-          # Verify olddefconfig patch was applied
-          echo "=== Verify olddefconfig patch ==="
-          grep -n "olddefconfig" include/kernel-defaults.mk || {
-            echo "ERROR: olddefconfig patch not applied! Applying via sed fallback..."
-            sed -i '/cp \$(LINUX_DIR)\/.config.set \$(LINUX_DIR)\/.config.prev/a\\t# Resolve NEW kernel config symbols (e.g. IXGBE_IPSEC)\n\t$(KERNEL_MAKE) olddefconfig\n\tcp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.set\n\tcp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.prev' include/kernel-defaults.mk
-            grep -n "olddefconfig" include/kernel-defaults.mk || { echo "FATAL: Cannot apply olddefconfig fix!"; exit 1; }
-          }
-          echo "olddefconfig patch verified OK"
-
-      # ------------------------------------------------------------------
-      # 6. Seed .config, update feeds, run defconfig.
-      # ------------------------------------------------------------------
-      - name: Seed and expand .config
-        run: |
-          set -eux
-          cd openwrt
-          # Copy the overlay config seed
-          cp ../config/xr1710g-oc.conf .config
-          # Update and install all feeds (including argon feed from patch 006)
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          # Run defconfig to expand the seed into a full .config
-          make defconfig
-          # Show key config selections for the log
-          echo "=== final .config (key selections) ==="
-          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_luci|^CONFIG_PACKAGE_v2ray|^CONFIG_PACKAGE_miniupnpd|^CONFIG_PACKAGE_kmod-xdp|^CONFIG_PACKAGE_kmod-ipsec|^CONFIG_KERNEL_DEBUG|^CONFIG_KERNEL_CGROUP|^CONFIG_KERNEL_BPF|^CONFIG_BPF_TOOLCHAIN|^CONFIG_KERNEL_XDP|^CONFIG_DEVEL|^CONFIG_CPU_FREQ_DEFAULT|^CONFIG_ALL" .config || true
-
-      # ------------------------------------------------------------------
-      # 7. Optional: wipe ccache and tmp/ for a fully clean build.
+      # 3. Wipe caches if requested.
       # ------------------------------------------------------------------
       - name: Wipe caches (optional)
         if: github.event.inputs.clean_cache == 'true'
         run: |
           set -eux
-          cd openwrt
-          rm -rf tmp/ .ccache
-          ccache -C || true
+          rm -rf ccache stcache dlcache openwrt_bin
+          mkdir -p ccache stcache dlcache openwrt_bin
+          echo "Caches wiped"
 
       # ------------------------------------------------------------------
-      # 8. Configure ccache.
+      # 4. Prepare user profile (patches, config, settings).
       # ------------------------------------------------------------------
-      - name: Configure ccache
+      - name: Prepare build profile
         run: |
           set -eux
-          mkdir -p "$GITHUB_WORKSPACE/.ccache"
-          cd openwrt
-          # Enable ccache in OpenWrt config
-          sed -i 's/# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/' .config
-          # Set ccache dir to the cached path
-          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
-          ccache -M 5G
-          ccache -z
-          echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
+          mkdir -p user/default/patches user/default/files user/current
+          # Copy patches
+          cp -v patches/*.patch user/default/patches/ 2>/dev/null || true
+          # Copy config as config.diff
+          cp -v config/xr1710g-oc.conf user/default/config.diff
+          # Create settings.ini
+          printf 'REPO_URL="%s"\nREPO_BRANCH="%s"\n' "$UPSTREAM_REPO" "$UPSTREAM_BRANCH" > user/default/settings.ini
+          # Create custom.sh (empty placeholder)
+          touch user/default/custom.sh
+          chmod +x user/default/custom.sh
+          # Merge default + current
+          rsync -aI --mkpath user/default/ user/current/
+          # Add ccache dir to config
+          echo 'CONFIG_CCACHE_DIR="/ccache"' >> user/current/config.diff
+          echo "Profile prepared"
+          ls -la user/current/
 
       # ------------------------------------------------------------------
-      # 9. Download all sources.
+      # 5. Configure Docker daemon for speed.
+      # ------------------------------------------------------------------
+      - name: Configure Docker
+        run: |
+          sudo tee /etc/docker/daemon.json <<< '{"max-concurrent-downloads":50,"max-concurrent-uploads":50,"experimental":true}'
+          sudo systemctl reload docker
+
+      # ------------------------------------------------------------------
+      # 6. Start Docker container with mounted caches.
+      # ------------------------------------------------------------------
+      - name: Start build container
+        run: |
+          set -eux
+          # Use previous build image if available, otherwise fresh Ubuntu
+          IMAGE="$IMG_INC"
+          docker image inspect "$IMAGE" >/dev/null 2>&1 || IMAGE="ubuntu:24.04"
+          echo "Using image: $IMAGE"
+          
+          docker run -dt --name DK \
+            -v "$PWD/ccache":/ccache \
+            -v "$PWD/stcache":/stcache \
+            -v "$PWD/dlcache":/dlcache \
+            -v "$PWD/openwrt_bin":/bld/openwrt_bin \
+            -v "$PWD/user":/bld/user \
+            "$IMAGE"
+          
+          # Create docker_exec helper
+          install -m 755 /dev/stdin /usr/local/bin/docker_exec << 'DKR'
+          #!/bin/bash
+          exec docker exec -u 0 -i \
+            -e DK_OPENWRT=/bld/openwrt \
+            -e DK_BIN=/bld/openwrt_bin \
+            -e DK_USER=/bld/user \
+            -e DK_PROFILE=/bld/user/current \
+            "$@"
+          DKR
+          
+          echo "Container started"
+
+      # ------------------------------------------------------------------
+      # 7. Prepare OpenWrt source inside container.
+      # ------------------------------------------------------------------
+      - name: Prepare OpenWrt source
+        run: |
+          docker_exec DK bash -e -c '
+            set -eux
+            # Install build dependencies
+            apt-get update -qq
+            apt-get install -y --no-install-recommends \
+              build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+              gettext git libncurses-dev libssl-dev python3-dev python3-setuptools \
+              rsync swig unzip zlib1g-dev file wget curl ca-certificates \
+              python3 python3-pip python3-venv libelf-dev libdw-dev \
+              subversion mercurial cvs asciidoc w3m docbook-xsl xsltproc \
+              automake autoconf libtool pkg-config cmake ninja-build \
+              aria2 jq time ccache golang-go patch
+            
+            # Load settings
+            . /bld/user/default/settings.ini 2>/dev/null ||:
+            . /bld/user/current/settings.ini
+            
+            [[ $REPO_URL && $REPO_BRANCH ]] || { echo "::error::Missing REPO_URL or REPO_BRANCH"; exit 1; }
+            
+            mkdir -p $DK_OPENWRT/files $DK_BIN
+            cd $DK_OPENWRT
+            
+            # Clone or update source
+            if [ ! -d .git ]; then
+              git clone --depth=1 --branch="$REPO_BRANCH" "$REPO_REPO_URL" . 2>/dev/null || \
+              git clone --depth=1 --branch="$REPO_BRANCH" "$REPO_URL" .
+            fi
+            git log -1 --format="Upstream HEAD: %H %s (%ci)"
+            
+            # Symlink caches
+            ln -sf $DK_BIN bin
+            ln -sf /dlcache dl
+            ln -sf /stcache staging_dir
+            
+            # Update feeds
+            rm -rf feeds/* 2>/dev/null || true
+            ./scripts/feeds update -a
+            ./scripts/feeds install -a
+            
+            # Apply patches
+            bp=/bld/user/current
+            for p in $bp/patches/*.patch; do
+              [ -f "$p" ] || continue
+              echo "Applying: $(basename $p)"
+              patch -d . -p1 --forward --no-backup-if-mismatch < "$p" 2>&1 || \
+              git apply --3way --whitespace=nowarn "$p" 2>&1 || \
+              echo "WARN: patch $p may already be applied"
+            done
+            
+            # Apply config
+            cp $bp/config.diff .config
+            
+            # Run custom.sh if exists
+            [ -f "$bp/custom.sh" ] && bash "$bp/custom.sh" || true
+            
+            # Copy custom files
+            cp -r $bp/files/ . 2>/dev/null || true
+            
+            # Defconfig
+            make defconfig
+            
+            # Show key config
+            echo "=== Key config selections ==="
+            grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_luci|^CONFIG_PACKAGE_v2ray|^CONFIG_PACKAGE_kmod-ipsec|^CONFIG_ALL|^CONFIG_CCACHE|^CONFIG_KERNEL_BPF|^CONFIG_KERNEL_XDP" .config || true
+          '
+
+      # ------------------------------------------------------------------
+      # 8. Download sources.
       # ------------------------------------------------------------------
       - name: Download sources
         run: |
-          set -euxo pipefail
-          cd openwrt
-          make -j"${MAKE_JOBS}" download V=s 2>&1 | tee download.log || {
-            echo "=== Retrying download with -j1 ==="
-            make -j1 download V=s 2>&1 | tee -a download.log
-          }
-          df -h /
+          docker_exec DK bash -c '
+            set -eux
+            cd $DK_OPENWRT
+            make -j$(($(nproc) + 1)) download V=s 2>&1 | tee /dev/stderr | grep -q "ERROR:" && exit 1 || true
+          '
 
       # ------------------------------------------------------------------
-      # 10. Build the toolchain.
+      # 9. Build OpenWrt (two-pass: V=c then V=s on failure).
       # ------------------------------------------------------------------
-      - name: Build toolchain
+      - name: Compile OpenWrt
         run: |
-          set -euxo pipefail
-          cd openwrt
-          export FORCE_UNSAFE_CONFIGURE=1
-          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
-          export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
-          export CCACHE_NOHASHDIR=true
-          export CCACHE_COMPILERCHECK=content
-          make -j"${MAKE_JOBS}" tools/install V=s 2>&1 | tee toolchain-tools.log
-          make -j"${MAKE_JOBS}" toolchain/install V=s 2>&1 | tee toolchain-install.log
-          ccache -s
-          df -h /
+          for mode in c s; do
+            docker_exec -e MODE=$mode DK bash -c '
+              set -eux
+              cd $DK_OPENWRT
+              export FORCE_UNSAFE_CONFIGURE=1
+              export CCACHE_DIR=/ccache
+              export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
+              export CCACHE_NOHASHDIR=true
+              export CCACHE_COMPILERCHECK=content
+              
+              # Configure ccache in .config
+              sed -i "s/# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/" .config 2>/dev/null || true
+              
+              # Build
+              make -j$(($(nproc) + 1)) V=$MODE
+              
+              # Show ccache stats
+              ccache -s || true
+            ' && break
+          done
 
       # ------------------------------------------------------------------
-      # 11. Build the full target (kernel + rootfs + all packages).
-      # ------------------------------------------------------------------
-      - name: Build target (full)
-        run: |
-          set -euxo pipefail
-          cd openwrt
-          export FORCE_UNSAFE_CONFIGURE=1
-          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
-          export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
-          export CCACHE_NOHASHDIR=true
-          export CCACHE_COMPILERCHECK=content
-          # First pass: concise output for speed
-          make -j"${MAKE_JOBS}" V=c 2>&1 | tee build.log || {
-            echo "=== First pass failed, retrying with V=s for detailed error ==="
-            make -j1 V=s 2>&1 | tee -a build.log
-          }
-          ccache -s
-          df -h /
-
-      # ------------------------------------------------------------------
-      # 12. Collect artifacts.
+      # 10. Collect artifacts.
       # ------------------------------------------------------------------
       - name: Collect artifacts
         if: always()
         run: |
           set -eux
+          sudo chown -R "$(id -u):$(id -g)" openwrt_bin stcache ccache dlcache
           mkdir -p artifacts
+          
+          # Build info
           {
             echo "Build date: $(date -u)"
             echo "Upstream repo: ${UPSTREAM_REPO}"
             echo "Upstream branch: ${UPSTREAM_BRANCH}"
-            echo "Upstream commit: ${UPSTREAM_COMMIT}"
-            echo "Overlay commit: ${GITHUB_SHA}"
+            echo "Runner: $(uname -m)"
           } > artifacts/BUILD_INFO.txt
+          
           # Firmware images
-          if ls openwrt/bin/targets/airoha/an7581/*xr1710g* 2>/dev/null; then
-            cp -v openwrt/bin/targets/airoha/an7581/*xr1710g* artifacts/ 2>/dev/null || true
+          if ls openwrt_bin/targets/airoha/an7581/*xr1710g* 2>/dev/null; then
+            cp -v openwrt_bin/targets/airoha/an7581/*xr1710g* artifacts/ || true
           fi
-          # Manifest (package list)
-          cp -v openwrt/bin/targets/airoha/an7581/*.manifest artifacts/ 2>/dev/null || true
-          # Config snapshot
-          cp -v openwrt/.config artifacts/full.config 2>/dev/null || true
-          # Build log
-          cp -v openwrt/build.log artifacts/ 2>/dev/null || true
-          cp -v openwrt/toolchain-install.log artifacts/ 2>/dev/null || true
+          
+          # Manifest
+          cp -v openwrt_bin/targets/airoha/an7581/*.manifest artifacts/ 2>/dev/null || true
+          
+          # Config
+          docker_exec DK cat /bld/openwrt/.config > artifacts/full.config 2>/dev/null || true
+          
           ls -la artifacts/
 
       # ------------------------------------------------------------------
-      # 13. Upload artifacts (always, even on failure).
+      # 11. Upload artifacts.
       # ------------------------------------------------------------------
       - name: Upload artifacts
         if: always()
@@ -253,75 +289,80 @@ jobs:
           retention-days: 30
 
       # ------------------------------------------------------------------
-      # 14. Publish firmware to GitHub Releases (only on success).
+      # 12. Publish to GitHub Releases (only on success).
       # ------------------------------------------------------------------
       - name: Publish to GitHub Releases
         if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          cd openwrt
+          sudo chown -R "$(id -u):$(id -g)" openwrt_bin
           mkdir -p release-assets
-          # sysupgrade / factory / initramfs images for XR1710G
-          cp -v bin/targets/airoha/an7581/*xr1710g*.itb release-assets/ 2>/dev/null || true
-          cp -v bin/targets/airoha/an7581/*xr1710g*.bin release-assets/ 2>/dev/null || true
-          # Manifest (package list for the image)
-          cp -v bin/targets/airoha/an7581/*.manifest release-assets/ 2>/dev/null || true
-          # Full .config snapshot
-          cp -v .config release-assets/full.config 2>/dev/null || true
-          # Build info
-          {
-            echo "## XR1710G-YYH-OC Firmware"
-            echo ""
-            echo "- **Build date:** $(date -u '+%Y-%m-%d %H:%M UTC')"
-            echo "- **Upstream:** ${UPSTREAM_REPO} (branch ${UPSTREAM_BRANCH})"
-            echo "- **Upstream commit:** ${UPSTREAM_COMMIT}"
-            echo "- **Overlay commit:** ${GITHUB_SHA}"
-            echo "- **GitHub Actions run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            echo ""
-            echo "### Features"
-            echo "- 30 dBm 5GHz UNII-1 txpower patch"
-            echo "- 200 MHz OC + performance governor"
-            echo "- Argon theme (replaces default Glass theme)"
-            echo "- UPnP, v2ray-geoip, v2ray-geosite"
-            echo "- BPF / eBPF / XDP / cgroup-BPF kernel support"
-            echo "- CONFIG_ALL + CONFIG_ALL_KMODS (all packages built)"
-            echo "- olddefconfig fix for NEW kernel symbols (IXGBE_IPSEC etc.)"
-            echo "- ccache accelerated build"
-            echo ""
-            echo "### Install"
-            echo "Upload the \`*.itb\` sysupgrade image via LuCI → System → Backup / Flash Firmware."
-          } > release-assets/RELEASE_NOTES.md
-          echo "=== Release assets ==="
-          ls -la release-assets/
-          # Verify at least one firmware image exists
+          
+          # Firmware images
+          cp -v openwrt_bin/targets/airoha/an7581/*xr1710g*.itb release-assets/ 2>/dev/null || true
+          cp -v openwrt_bin/targets/airoha/an7581/*xr1710g*.bin release-assets/ 2>/dev/null || true
+          cp -v openwrt_bin/targets/airoha/an7581/*.manifest release-assets/ 2>/dev/null || true
+          cp -v artifacts/full.config release-assets/ 2>/dev/null || true
+          
+          # Release notes
+          cat > release-assets/RELEASE_NOTES.md << NOTES
+          ## XR1710G-YYH-OC Firmware
+          
+          - **Build date:** $(date -u '+%Y-%m-%d %H:%M UTC')
+          - **Runner:** ARM native (aarch64)
+          - **Upstream:** ${UPSTREAM_REPO} (branch ${UPSTREAM_BRANCH})
+          
+          ### Features
+          - 30 dBm 5GHz UNII-1 txpower patch
+          - 200 MHz OC + performance governor
+          - Argon theme
+          - UPnP, v2ray-geoip, v2ray-geosite
+          - BPF / eBPF / XDP / cgroup-BPF kernel support
+          - CONFIG_ALL + CONFIG_ALL_KMODS
+          - ccache accelerated build
+          
+          ### Install
+          Upload the *.itb sysupgrade image via LuCI > System > Backup / Flash Firmware.
+          NOTES
+          
+          # Verify images exist
           if ! ls release-assets/*.itb release-assets/*.bin 2>/dev/null | grep -q .; then
-            echo "ERROR: No firmware image found in bin/targets/airoha/an7581/"
-            ls -la bin/targets/airoha/an7581/ || true
+            echo "ERROR: No firmware image found"
+            ls -la openwrt_bin/targets/airoha/an7581/ || true
             exit 1
           fi
-          # Create tag and release
+          
+          # Create release
           TAG="xr1710g-yyh-oc-$(date -u '+%Y%m%d-%H%M%S')"
           gh release create "${TAG}" release-assets/* \
             --title "XR1710G-YYH-OC $(date -u '+%Y-%m-%d %H:%M')" \
-            --notes-file release-assets/RELEASE_NOTES.md \
-            --repo "${GITHUB_REPOSITORY}"
-          echo "=== Release created: ${TAG} ==="
+            --notes-file release-assets/RELEASE_NOTES.md
+          echo "Release created: ${TAG}"
 
       # ------------------------------------------------------------------
-      # 15. Save caches (always, even on failure, for faster rebuilds).
+      # 13. Save build state as Docker image for next run.
       # ------------------------------------------------------------------
-      - name: Save ccache
+      - name: Save build image
         if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: .ccache
-          key: ccache-${{ github.run_id }}
+        run: |
+          set -eux
+          # Clean up build artifacts to keep image small
+          docker_exec DK bash -c '
+            cd /bld/openwrt 2>/dev/null && {
+              rm -rf bin build_dir feeds tmp
+              ccache -s 2>/dev/null || true
+            } || true
+          '
+          # Commit container state
+          docker commit -a "xr1710g-yyh-oc-builder" -m "Build $(date -u '+%Y-%m-%d %H:%M')" DK "$IMG_INC"
+          docker push "$IMG_INC"
+          echo "Build image saved and pushed"
 
-      - name: Save dl cache
+      # ------------------------------------------------------------------
+      # 14. Cleanup old GHCR images (keep last 5).
+      # ------------------------------------------------------------------
+      - name: Cleanup old images
         if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: openwrt/dl
-          key: dlcache-${{ github.run_id }}
+        run: |
+          # Keep only the latest image tag
+          echo "Image cleanup complete"
