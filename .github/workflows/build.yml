@@ -22,8 +22,6 @@ jobs:
     env:
       DK_OPENWRT: /bld/openwrt
       DK_BIN: /bld/openwrt_bin
-      DK_USER: /bld/user
-      DK_PROFILE: /bld/user/current
       UPSTREAM_REPO: "https://github.com/YYH2913/openwrt.git"
       UPSTREAM_BRANCH: "xr1710g-6.18-integration"
       GH_TOKEN: ${{ github.token }}
@@ -75,30 +73,7 @@ jobs:
           echo "Caches wiped"
 
       # ------------------------------------------------------------------
-      # 4. Prepare user profile (patches, config, settings).
-      # ------------------------------------------------------------------
-      - name: Prepare build profile
-        run: |
-          set -eux
-          mkdir -p user/default/patches user/default/files user/current
-          # Copy patches
-          cp -v patches/*.patch user/default/patches/ 2>/dev/null || true
-          # Copy config as config.diff
-          cp -v config/xr1710g-oc.conf user/default/config.diff
-          # Create settings.ini
-          printf 'REPO_URL="%s"\nREPO_BRANCH="%s"\n' "$UPSTREAM_REPO" "$UPSTREAM_BRANCH" > user/default/settings.ini
-          # Create custom.sh (empty placeholder)
-          touch user/default/custom.sh
-          chmod +x user/default/custom.sh
-          # Merge default + current
-          rsync -aI --mkpath user/default/ user/current/
-          # Add ccache dir to config
-          echo 'CONFIG_CCACHE_DIR="/ccache"' >> user/current/config.diff
-          echo "Profile prepared"
-          ls -la user/current/
-
-      # ------------------------------------------------------------------
-      # 5. Configure Docker daemon for speed.
+      # 4. Configure Docker daemon for speed.
       # ------------------------------------------------------------------
       - name: Configure Docker
         run: |
@@ -106,7 +81,7 @@ jobs:
           sudo systemctl reload docker
 
       # ------------------------------------------------------------------
-      # 6. Start Docker container with mounted caches.
+      # 5. Start Docker container with mounted caches.
       # ------------------------------------------------------------------
       - name: Start build container
         run: |
@@ -115,35 +90,32 @@ jobs:
           IMAGE="$IMG_INC"
           docker image inspect "$IMAGE" >/dev/null 2>&1 || IMAGE="ubuntu:24.04"
           echo "Using image: $IMAGE"
-          
+
           docker run -dt --name DK \
             -v "$PWD/ccache":/ccache \
             -v "$PWD/stcache":/stcache \
             -v "$PWD/dlcache":/dlcache \
             -v "$PWD/openwrt_bin":/bld/openwrt_bin \
-            -v "$PWD/user":/bld/user \
+            -v "$PWD":/workspace \
             "$IMAGE"
-          
+
           # Create docker_exec helper
-          install -m 755 /dev/stdin /usr/local/bin/docker_exec << 'DKR'
+          cat > /usr/local/bin/docker_exec << 'DKREOF'
           #!/bin/bash
           exec docker exec -u 0 -i \
             -e DK_OPENWRT=/bld/openwrt \
             -e DK_BIN=/bld/openwrt_bin \
-            -e DK_USER=/bld/user \
-            -e DK_PROFILE=/bld/user/current \
             "$@"
-          DKR
-          
+          DKREOF
+          chmod +x /usr/local/bin/docker_exec
           echo "Container started"
 
       # ------------------------------------------------------------------
-      # 7. Prepare OpenWrt source inside container.
+      # 6. Prepare OpenWrt source inside container.
       # ------------------------------------------------------------------
       - name: Prepare OpenWrt source
         run: |
-          docker_exec DK bash -e -c '
-            set -eux
+          docker_exec DK bash -euxc '
             # Install build dependencies
             apt-get update -qq
             apt-get install -y --no-install-recommends \
@@ -154,130 +126,102 @@ jobs:
               subversion mercurial cvs asciidoc w3m docbook-xsl xsltproc \
               automake autoconf libtool pkg-config cmake ninja-build \
               aria2 jq time ccache golang-go patch
-            
-            # Load settings
-            . /bld/user/default/settings.ini 2>/dev/null ||:
-            . /bld/user/current/settings.ini
-            
-            [[ $REPO_URL && $REPO_BRANCH ]] || { echo "::error::Missing REPO_URL or REPO_BRANCH"; exit 1; }
-            
-            mkdir -p $DK_OPENWRT/files $DK_BIN
-            cd $DK_OPENWRT
-            
-            # Clone or update source
-            if [ ! -d .git ]; then
-              git clone --depth=1 --branch="$REPO_BRANCH" "$REPO_REPO_URL" . 2>/dev/null || \
-              git clone --depth=1 --branch="$REPO_BRANCH" "$REPO_URL" .
-            fi
+
+            mkdir -p /bld/openwrt /bld/openwrt_bin
+
+            # Clone source
+            cd /bld/openwrt
+            git clone --depth=1 --branch="$UPSTREAM_BRANCH" "$UPSTREAM_REPO" .
             git log -1 --format="Upstream HEAD: %H %s (%ci)"
-            
+
             # Symlink caches
-            ln -sf $DK_BIN bin
+            ln -sf /bld/openwrt_bin bin
             ln -sf /dlcache dl
             ln -sf /stcache staging_dir
-            
-            # Update feeds
-            rm -rf feeds/* 2>/dev/null || true
+
+            # Update and install feeds
             ./scripts/feeds update -a
             ./scripts/feeds install -a
-            
-            # Apply patches
-            bp=/bld/user/current
-            for p in $bp/patches/*.patch; do
-              [ -f "$p" ] || continue
-              echo "Applying: $(basename $p)"
-              patch -d . -p1 --forward --no-backup-if-mismatch < "$p" 2>&1 || \
-              git apply --3way --whitespace=nowarn "$p" 2>&1 || \
-              echo "WARN: patch $p may already be applied"
-            done
-            
-            # Apply config
-            cp $bp/config.diff .config
-            
-            # Run custom.sh if exists
-            [ -f "$bp/custom.sh" ] && bash "$bp/custom.sh" || true
-            
-            # Copy custom files
-            cp -r $bp/files/ . 2>/dev/null || true
-            
-            # Defconfig
+
+            # Apply overlay patches
+            /workspace/scripts/apply-patches.sh /bld/openwrt
+
+            # Copy config seed
+            cp /workspace/config/xr1710g-oc.conf .config
+
+            # Run defconfig
             make defconfig
-            
-            # Show key config
+
+            # Show key config selections
             echo "=== Key config selections ==="
-            grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_luci|^CONFIG_PACKAGE_v2ray|^CONFIG_PACKAGE_kmod-ipsec|^CONFIG_ALL|^CONFIG_CCACHE|^CONFIG_KERNEL_BPF|^CONFIG_KERNEL_XDP" .config || true
+            grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_kmod-ipsec|^CONFIG_ALL|^CONFIG_CCACHE|^CONFIG_PACKAGE_luci-theme-argon" .config || true
           '
 
       # ------------------------------------------------------------------
-      # 8. Download sources.
+      # 7. Download sources.
       # ------------------------------------------------------------------
       - name: Download sources
         run: |
           docker_exec DK bash -c '
             set -eux
-            cd $DK_OPENWRT
-            make -j$(($(nproc) + 1)) download V=s 2>&1 | tee /dev/stderr | grep -q "ERROR:" && exit 1 || true
+            cd /bld/openwrt
+            make -j$(($(nproc) + 1)) download V=s 2>&1 | tail -20
           '
 
       # ------------------------------------------------------------------
-      # 9. Build OpenWrt (two-pass: V=c then V=s on failure).
+      # 8. Configure ccache and build (two-pass: V=c then V=s on failure).
       # ------------------------------------------------------------------
       - name: Compile OpenWrt
         run: |
-          for mode in c s; do
-            docker_exec -e MODE=$mode DK bash -c '
-              set -eux
-              cd $DK_OPENWRT
-              export FORCE_UNSAFE_CONFIGURE=1
-              export CCACHE_DIR=/ccache
-              export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
-              export CCACHE_NOHASHDIR=true
-              export CCACHE_COMPILERCHECK=content
-              
-              # Configure ccache in .config
-              sed -i "s/# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/" .config 2>/dev/null || true
-              
-              # Build
-              make -j$(($(nproc) + 1)) V=$MODE
-              
-              # Show ccache stats
-              ccache -s || true
-            ' && break
-          done
+          docker_exec DK bash -c '
+            set -eux
+            cd /bld/openwrt
+            export FORCE_UNSAFE_CONFIGURE=1
+            export CCACHE_DIR=/ccache
+            export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
+            export CCACHE_NOHASHDIR=true
+            export CCACHE_COMPILERCHECK=content
+
+            # Enable ccache
+            sed -i "s/# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/" .config
+            ccache -M 5G
+            ccache -z
+
+            # Build toolchain first
+            make -j$(($(nproc) + 1)) tools/install V=s 2>&1 | tail -20
+            make -j$(($(nproc) + 1)) toolchain/install V=s 2>&1 | tail -20
+
+            # Two-pass build: V=c first (faster), V=s on failure
+            for mode in c s; do
+              make -j$(($(nproc) + 1)) V=$mode && break
+            done
+
+            ccache -s
+          '
 
       # ------------------------------------------------------------------
-      # 10. Collect artifacts.
+      # 9. Collect artifacts.
       # ------------------------------------------------------------------
       - name: Collect artifacts
         if: always()
         run: |
           set -eux
-          sudo chown -R "$(id -u):$(id -g)" openwrt_bin stcache ccache dlcache
+          sudo chown -R "$(id -u):$(id -g)" openwrt_bin stcache ccache dlcache 2>/dev/null || true
           mkdir -p artifacts
-          
-          # Build info
           {
             echo "Build date: $(date -u)"
             echo "Upstream repo: ${UPSTREAM_REPO}"
             echo "Upstream branch: ${UPSTREAM_BRANCH}"
             echo "Runner: $(uname -m)"
           } > artifacts/BUILD_INFO.txt
-          
           # Firmware images
-          if ls openwrt_bin/targets/airoha/an7581/*xr1710g* 2>/dev/null; then
-            cp -v openwrt_bin/targets/airoha/an7581/*xr1710g* artifacts/ || true
-          fi
-          
+          cp -v openwrt_bin/targets/airoha/an7581/*xr1710g* artifacts/ 2>/dev/null || true
           # Manifest
           cp -v openwrt_bin/targets/airoha/an7581/*.manifest artifacts/ 2>/dev/null || true
-          
-          # Config
-          docker_exec DK cat /bld/openwrt/.config > artifacts/full.config 2>/dev/null || true
-          
           ls -la artifacts/
 
       # ------------------------------------------------------------------
-      # 11. Upload artifacts.
+      # 10. Upload artifacts.
       # ------------------------------------------------------------------
       - name: Upload artifacts
         if: always()
@@ -289,7 +233,7 @@ jobs:
           retention-days: 30
 
       # ------------------------------------------------------------------
-      # 12. Publish to GitHub Releases (only on success).
+      # 11. Publish to GitHub Releases (only on success).
       # ------------------------------------------------------------------
       - name: Publish to GitHub Releases
         if: success()
@@ -297,72 +241,28 @@ jobs:
           set -euxo pipefail
           sudo chown -R "$(id -u):$(id -g)" openwrt_bin
           mkdir -p release-assets
-          
-          # Firmware images
           cp -v openwrt_bin/targets/airoha/an7581/*xr1710g*.itb release-assets/ 2>/dev/null || true
           cp -v openwrt_bin/targets/airoha/an7581/*xr1710g*.bin release-assets/ 2>/dev/null || true
           cp -v openwrt_bin/targets/airoha/an7581/*.manifest release-assets/ 2>/dev/null || true
-          cp -v artifacts/full.config release-assets/ 2>/dev/null || true
-          
-          # Release notes
-          cat > release-assets/RELEASE_NOTES.md << NOTES
-          ## XR1710G-YYH-OC Firmware
-          
-          - **Build date:** $(date -u '+%Y-%m-%d %H:%M UTC')
-          - **Runner:** ARM native (aarch64)
-          - **Upstream:** ${UPSTREAM_REPO} (branch ${UPSTREAM_BRANCH})
-          
-          ### Features
-          - 30 dBm 5GHz UNII-1 txpower patch
-          - 200 MHz OC + performance governor
-          - Argon theme
-          - UPnP, v2ray-geoip, v2ray-geosite
-          - BPF / eBPF / XDP / cgroup-BPF kernel support
-          - CONFIG_ALL + CONFIG_ALL_KMODS
-          - ccache accelerated build
-          
-          ### Install
-          Upload the *.itb sysupgrade image via LuCI > System > Backup / Flash Firmware.
-          NOTES
-          
-          # Verify images exist
           if ! ls release-assets/*.itb release-assets/*.bin 2>/dev/null | grep -q .; then
             echo "ERROR: No firmware image found"
-            ls -la openwrt_bin/targets/airoha/an7581/ || true
             exit 1
           fi
-          
-          # Create release
           TAG="xr1710g-yyh-oc-$(date -u '+%Y%m%d-%H%M%S')"
           gh release create "${TAG}" release-assets/* \
             --title "XR1710G-YYH-OC $(date -u '+%Y-%m-%d %H:%M')" \
-            --notes-file release-assets/RELEASE_NOTES.md
+            --notes "ARM native build. Upload *.itb via LuCI > System > Backup/Flash Firmware."
           echo "Release created: ${TAG}"
 
       # ------------------------------------------------------------------
-      # 13. Save build state as Docker image for next run.
+      # 12. Save build state as Docker image for next run.
       # ------------------------------------------------------------------
       - name: Save build image
         if: always()
         run: |
           set -eux
-          # Clean up build artifacts to keep image small
-          docker_exec DK bash -c '
-            cd /bld/openwrt 2>/dev/null && {
-              rm -rf bin build_dir feeds tmp
-              ccache -s 2>/dev/null || true
-            } || true
-          '
-          # Commit container state
+          # Clean up to keep image small
+          docker exec DK bash -c 'cd /bld/openwrt 2>/dev/null && rm -rf bin build_dir feeds tmp' 2>/dev/null || true
           docker commit -a "xr1710g-yyh-oc-builder" -m "Build $(date -u '+%Y-%m-%d %H:%M')" DK "$IMG_INC"
-          docker push "$IMG_INC"
-          echo "Build image saved and pushed"
-
-      # ------------------------------------------------------------------
-      # 14. Cleanup old GHCR images (keep last 5).
-      # ------------------------------------------------------------------
-      - name: Cleanup old images
-        if: always()
-        run: |
-          # Keep only the latest image tag
-          echo "Image cleanup complete"
+          docker push "$IMG_INC" || true
+          echo "Build image saved"
