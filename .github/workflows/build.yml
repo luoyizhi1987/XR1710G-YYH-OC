@@ -120,7 +120,9 @@ jobs:
               automake autoconf libtool pkg-config cmake ninja-build \
               aria2 jq time ccache golang-go patch
 
-            mkdir -p /bld/openwrt /bld/openwrt_bin
+            mkdir -p /bld/openwrt_bin
+            rm -rf /bld/openwrt
+            mkdir -p /bld/openwrt
             cd /bld/openwrt
             git clone --depth=1 --branch="$UPSTREAM_BRANCH" "$UPSTREAM_REPO" .
             git log -1 --format="Upstream HEAD: %H %s (%ci)"
