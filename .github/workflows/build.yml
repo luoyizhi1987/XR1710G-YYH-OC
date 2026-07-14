@@ -19,7 +19,6 @@ concurrency:
 env:
   UPSTREAM_REPO: "https://github.com/YYH2913/openwrt.git"
   UPSTREAM_BRANCH: "xr1710g-6.18-integration"
-  MAKE_JOBS: "4"
 
 permissions:
   contents: write
@@ -53,7 +52,7 @@ jobs:
           fetch-depth: 1
 
       # ------------------------------------------------------------------
-      # 2. Install build dependencies (latest GCC on Ubuntu 24.04).
+      # 2. Install build dependencies.
       # ------------------------------------------------------------------
       - name: Install build dependencies
         run: |
@@ -68,6 +67,7 @@ jobs:
             automake autoconf libtool pkg-config cmake ninja-build \
             aria2 jq time ccache golang-go
           gcc --version
+          echo "MAKE_JOBS=$(($(nproc) + 1))" >> "$GITHUB_ENV"
           df -h /
 
       # ------------------------------------------------------------------
@@ -99,7 +99,7 @@ jobs:
           echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
-      # 5. Apply overlay patches (30dBm, OC, theme, packages, olddefconfig, argon feed).
+      # 5. Apply overlay patches.
       # ------------------------------------------------------------------
       - name: Apply overlay patches
         run: |
@@ -110,14 +110,13 @@ jobs:
           echo "=== Verify olddefconfig patch ==="
           grep -n "olddefconfig" include/kernel-defaults.mk || {
             echo "ERROR: olddefconfig patch not applied! Applying via sed fallback..."
-            # Sed fallback: add olddefconfig after the .config.prev copy block
             sed -i '/cp \$(LINUX_DIR)\/.config.set \$(LINUX_DIR)\/.config.prev/a\\t# Resolve NEW kernel config symbols (e.g. IXGBE_IPSEC)\n\t$(KERNEL_MAKE) olddefconfig\n\tcp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.set\n\tcp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.prev' include/kernel-defaults.mk
             grep -n "olddefconfig" include/kernel-defaults.mk || { echo "FATAL: Cannot apply olddefconfig fix!"; exit 1; }
           }
           echo "olddefconfig patch verified OK"
 
       # ------------------------------------------------------------------
-      # 6. Seed .config, update feeds (including argon), run defconfig.
+      # 6. Seed .config, update feeds, run defconfig.
       # ------------------------------------------------------------------
       - name: Seed and expand .config
         run: |
@@ -132,7 +131,7 @@ jobs:
           make defconfig
           # Show key config selections for the log
           echo "=== final .config (key selections) ==="
-          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_luci|^CONFIG_PACKAGE_v2ray|^CONFIG_PACKAGE_miniupnpd|^CONFIG_PACKAGE_kmod-xdp|^CONFIG_KERNEL_DEBUG|^CONFIG_KERNEL_CGROUP|^CONFIG_KERNEL_BPF|^CONFIG_BPF_TOOLCHAIN|^CONFIG_KERNEL_XDP|^CONFIG_DEVEL|^CONFIG_CPU_FREQ_DEFAULT|^CONFIG_ALL" .config || true
+          grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_luci|^CONFIG_PACKAGE_v2ray|^CONFIG_PACKAGE_miniupnpd|^CONFIG_PACKAGE_kmod-xdp|^CONFIG_PACKAGE_kmod-ipsec|^CONFIG_KERNEL_DEBUG|^CONFIG_KERNEL_CGROUP|^CONFIG_KERNEL_BPF|^CONFIG_BPF_TOOLCHAIN|^CONFIG_KERNEL_XDP|^CONFIG_DEVEL|^CONFIG_CPU_FREQ_DEFAULT|^CONFIG_ALL" .config || true
 
       # ------------------------------------------------------------------
       # 7. Optional: wipe ccache and tmp/ for a fully clean build.
@@ -162,7 +161,7 @@ jobs:
           echo "CCACHE_DIR=$GITHUB_WORKSPACE/.ccache" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------------
-      # 9. Download all sources (dl/ tarballs).
+      # 9. Download all sources.
       # ------------------------------------------------------------------
       - name: Download sources
         run: |
@@ -175,7 +174,7 @@ jobs:
           df -h /
 
       # ------------------------------------------------------------------
-      # 10. Build the toolchain (this is the slow part, ccache helps here).
+      # 10. Build the toolchain.
       # ------------------------------------------------------------------
       - name: Build toolchain
         run: |
@@ -193,7 +192,6 @@ jobs:
 
       # ------------------------------------------------------------------
       # 11. Build the full target (kernel + rootfs + all packages).
-      #     Two-pass: V=c (concise) first for speed, V=s (verbose) on failure.
       # ------------------------------------------------------------------
       - name: Build target (full)
         run: |
