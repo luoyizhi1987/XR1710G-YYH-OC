@@ -93,6 +93,8 @@ jobs:
       - name: Clone upstream OpenWrt source
         run: |
           set -eux
+          # Remove leftover openwrt dir from dl cache restore
+          rm -rf openwrt
           git clone --depth=1 --branch="${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" openwrt
           cd openwrt
           git log -1 --format='Upstream HEAD: %H %s (%ci)'
