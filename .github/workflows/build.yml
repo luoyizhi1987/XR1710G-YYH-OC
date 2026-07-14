@@ -99,14 +99,17 @@ jobs:
             -v "$PWD":/workspace \
             "$IMAGE"
 
-          # Create docker_exec helper
-          cat > /usr/local/bin/docker_exec << 'DKREOF'
-          #!/bin/bash
-          exec docker exec -u 0 -i \
-            -e DK_OPENWRT=/bld/openwrt \
-            -e DK_BIN=/bld/openwrt_bin \
-            "$@"
-          DKREOF
+          # Create docker_exec helper - forward all job-level env vars
+          {
+            echo '#!/bin/bash'
+            echo 'exec docker exec -u 0 -i \\'
+            echo '  -e DK_OPENWRT=/bld/openwrt \'
+            echo '  -e DK_BIN=/bld/openwrt_bin \'
+            echo "  -e UPSTREAM_REPO=${UPSTREAM_REPO} \\"
+            echo "  -e UPSTREAM_BRANCH=${UPSTREAM_BRANCH} \\"
+            echo "  -e GH_TOKEN=${GH_TOKEN} \\"
+            echo '  "$@"'
+          } > /usr/local/bin/docker_exec
           chmod +x /usr/local/bin/docker_exec
           echo "Container started"
 
@@ -134,7 +137,8 @@ jobs:
             git clone --depth=1 --branch="$UPSTREAM_BRANCH" "$UPSTREAM_REPO" .
             git log -1 --format="Upstream HEAD: %H %s (%ci)"
 
-            # Symlink caches
+            # Symlink caches (remove existing dirs/files first to avoid nesting)
+            rm -rf bin dl staging_dir 2>/dev/null || true
             ln -sf /bld/openwrt_bin bin
             ln -sf /dlcache dl
             ln -sf /stcache staging_dir
