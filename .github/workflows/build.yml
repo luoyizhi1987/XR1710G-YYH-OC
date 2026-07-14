@@ -86,11 +86,9 @@ jobs:
       - name: Start build container
         run: |
           set -eux
-          # Use previous build image if available, otherwise fresh Ubuntu
           IMAGE="$IMG_INC"
           docker image inspect "$IMAGE" >/dev/null 2>&1 || IMAGE="ubuntu:24.04"
           echo "Using image: $IMAGE"
-
           docker run -dt --name DK \
             -v "$PWD/ccache":/ccache \
             -v "$PWD/stcache":/stcache \
@@ -98,19 +96,6 @@ jobs:
             -v "$PWD/openwrt_bin":/bld/openwrt_bin \
             -v "$PWD":/workspace \
             "$IMAGE"
-
-          # Create docker_exec helper - forward all job-level env vars
-          {
-            echo '#!/bin/bash'
-            echo 'exec docker exec -u 0 -i \\'
-            echo '  -e DK_OPENWRT=/bld/openwrt \'
-            echo '  -e DK_BIN=/bld/openwrt_bin \'
-            echo "  -e UPSTREAM_REPO=${UPSTREAM_REPO} \\"
-            echo "  -e UPSTREAM_BRANCH=${UPSTREAM_BRANCH} \\"
-            echo "  -e GH_TOKEN=${GH_TOKEN} \\"
-            echo '  "$@"'
-          } > /usr/local/bin/docker_exec
-          chmod +x /usr/local/bin/docker_exec
           echo "Container started"
 
       # ------------------------------------------------------------------
@@ -118,8 +103,13 @@ jobs:
       # ------------------------------------------------------------------
       - name: Prepare OpenWrt source
         run: |
-          docker_exec DK bash -euxc '
-            # Install build dependencies
+          docker exec -u 0 -i \
+            -e DK_OPENWRT="${DK_OPENWRT}" \
+            -e DK_BIN="${DK_BIN}" \
+            -e UPSTREAM_REPO="${UPSTREAM_REPO}" \
+            -e UPSTREAM_BRANCH="${UPSTREAM_BRANCH}" \
+            -e GH_TOKEN="${GH_TOKEN}" \
+            DK bash -euxc '
             apt-get update -qq
             apt-get install -y --no-install-recommends \
               build-essential clang flex bison g++ gawk \
@@ -131,32 +121,21 @@ jobs:
               aria2 jq time ccache golang-go patch
 
             mkdir -p /bld/openwrt /bld/openwrt_bin
-
-            # Clone source
             cd /bld/openwrt
             git clone --depth=1 --branch="$UPSTREAM_BRANCH" "$UPSTREAM_REPO" .
             git log -1 --format="Upstream HEAD: %H %s (%ci)"
 
-            # Symlink caches (remove existing dirs/files first to avoid nesting)
             rm -rf bin dl staging_dir 2>/dev/null || true
             ln -sf /bld/openwrt_bin bin
             ln -sf /dlcache dl
             ln -sf /stcache staging_dir
 
-            # Update and install feeds
             ./scripts/feeds update -a
             ./scripts/feeds install -a
-
-            # Apply overlay patches
             /workspace/scripts/apply-patches.sh /bld/openwrt
-
-            # Copy config seed
             cp /workspace/config/xr1710g-oc.conf .config
-
-            # Run defconfig
             make defconfig
 
-            # Show key config selections
             echo "=== Key config selections ==="
             grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_kmod-ipsec|^CONFIG_ALL|^CONFIG_CCACHE|^CONFIG_PACKAGE_luci-theme-argon" .config || true
           '
@@ -166,7 +145,13 @@ jobs:
       # ------------------------------------------------------------------
       - name: Download sources
         run: |
-          docker_exec DK bash -c '
+          docker exec -u 0 -i \
+            -e DK_OPENWRT="${DK_OPENWRT}" \
+            -e DK_BIN="${DK_BIN}" \
+            -e UPSTREAM_REPO="${UPSTREAM_REPO}" \
+            -e UPSTREAM_BRANCH="${UPSTREAM_BRANCH}" \
+            -e GH_TOKEN="${GH_TOKEN}" \
+            DK bash -c '
             set -eux
             cd /bld/openwrt
             make -j$(($(nproc) + 1)) download V=s 2>&1 | tail -20
@@ -177,7 +162,13 @@ jobs:
       # ------------------------------------------------------------------
       - name: Compile OpenWrt
         run: |
-          docker_exec DK bash -c '
+          docker exec -u 0 -i \
+            -e DK_OPENWRT="${DK_OPENWRT}" \
+            -e DK_BIN="${DK_BIN}" \
+            -e UPSTREAM_REPO="${UPSTREAM_REPO}" \
+            -e UPSTREAM_BRANCH="${UPSTREAM_BRANCH}" \
+            -e GH_TOKEN="${GH_TOKEN}" \
+            DK bash -c '
             set -eux
             cd /bld/openwrt
             export FORCE_UNSAFE_CONFIGURE=1
@@ -186,16 +177,13 @@ jobs:
             export CCACHE_NOHASHDIR=true
             export CCACHE_COMPILERCHECK=content
 
-            # Enable ccache
             sed -i "s/# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/" .config
             ccache -M 5G
             ccache -z
 
-            # Build toolchain first
             make -j$(($(nproc) + 1)) tools/install V=s 2>&1 | tail -20
             make -j$(($(nproc) + 1)) toolchain/install V=s 2>&1 | tail -20
 
-            # Two-pass build: V=c first (faster), V=s on failure
             for mode in c s; do
               make -j$(($(nproc) + 1)) V=$mode && break
             done
@@ -218,9 +206,7 @@ jobs:
             echo "Upstream branch: ${UPSTREAM_BRANCH}"
             echo "Runner: $(uname -m)"
           } > artifacts/BUILD_INFO.txt
-          # Firmware images
           cp -v openwrt_bin/targets/airoha/an7581/*xr1710g* artifacts/ 2>/dev/null || true
-          # Manifest
           cp -v openwrt_bin/targets/airoha/an7581/*.manifest artifacts/ 2>/dev/null || true
           ls -la artifacts/
 
@@ -265,7 +251,6 @@ jobs:
         if: always()
         run: |
           set -eux
-          # Clean up to keep image small
           docker exec DK bash -c 'cd /bld/openwrt 2>/dev/null && rm -rf bin build_dir feeds tmp' 2>/dev/null || true
           docker commit -a "xr1710g-yyh-oc-builder" -m "Build $(date -u '+%Y-%m-%d %H:%M')" DK "$IMG_INC"
           docker push "$IMG_INC" || true
