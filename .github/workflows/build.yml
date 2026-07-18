@@ -120,6 +120,34 @@ jobs:
               automake autoconf libtool pkg-config cmake ninja-build \
               aria2 jq time ccache golang-go patch
 
+            # ---- XR1710G-YYH-OC fix: provide a Go >= 1.24.6 toolchain for ----
+            # ---- golang1.26 host bootstrap (apt's golang-go is too old).  ----
+            # v2ray-geoip/geosite pull in the golang1.26 host feed, whose
+            # dist bootstrap refuses any Go below 1.24.6 via
+            # src/cmd/dist/notgo124.go. Ubuntu 24.04's apt golang-go ships
+            # Go 1.22.x, which trips that gate. .config already points
+            # CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT at /usr/lib/go/, so we
+            # install a fresh official Go 1.24.6 (>= the gate) there.
+            GO_BOOTSTRAP_VERSION="1.24.6"
+            case "$(uname -m)" in
+              x86_64)  GO_ARCH=amd64 ;;
+              aarch64) GO_ARCH=arm64 ;;
+              *)       GO_ARCH=arm64 ;;
+            esac
+            GO_TARBALL="go${GO_BOOTSTRAP_VERSION}.linux-${GO_ARCH}.tar.gz"
+            curl -fsSL --retry 3 "https://go.dev/dl/${GO_TARBALL}" -o "/tmp/${GO_TARBALL}"
+            rm -rf /usr/lib/go /usr/local/go
+            tar -C /usr/lib -xzf "/tmp/${GO_TARBALL}"
+            rm -f "/tmp/${GO_TARBALL}"
+            ln -sf /usr/lib/go/bin/go    /usr/local/bin/go
+            ln -sf /usr/lib/go/bin/gofmt /usr/local/bin/gofmt
+            export GOROOT=/usr/lib/go
+            export PATH="/usr/lib/go/bin:${PATH}"
+            hash -r
+            echo "Installed host Go for golang1.26 bootstrap:"
+            go version
+            test "$(go version | awk '{print $3}')" = "go${GO_BOOTSTRAP_VERSION}"
+
             mkdir -p /bld/openwrt_bin
             rm -rf /bld/openwrt
             mkdir -p /bld/openwrt
