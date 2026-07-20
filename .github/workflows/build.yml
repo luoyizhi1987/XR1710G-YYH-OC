@@ -201,6 +201,7 @@ jobs:
             DK bash -c '
             set -euxo pipefail
             cd /bld/openwrt
+            export FORCE_UNSAFE_CONFIGURE=1
             mkdir -p /workspace/logs
             make -j$(($(nproc) * 2)) download V=s 2>&1 | tee /workspace/logs/01-download.log
           '
@@ -217,6 +218,7 @@ jobs:
             DK bash -c '
             set -euxo pipefail
             cd /bld/openwrt
+            export FORCE_UNSAFE_CONFIGURE=1
             make -j$(($(nproc) * 2)) tools/install V=s 2>&1 | tee /workspace/logs/02-tools.log
           '
 
@@ -231,6 +233,7 @@ jobs:
             DK bash -c '
             set -euxo pipefail
             cd /bld/openwrt
+            export FORCE_UNSAFE_CONFIGURE=1
             make -j$(($(nproc) * 2)) toolchain/install V=s 2>&1 | tee /workspace/logs/03-toolchain.log
           '
 
@@ -319,6 +322,7 @@ jobs:
             DK bash -c '
             set -euxo pipefail
             cd /bld/openwrt
+            export FORCE_UNSAFE_CONFIGURE=1
             make -j$(($(nproc) * 2)) package/rootfs V=s 2>&1 | tee /workspace/logs/07-rootfs.log
             make -j$(($(nproc) * 2)) target/image    V=s 2>&1 | tee /workspace/logs/08-image.log
             ccache -s
