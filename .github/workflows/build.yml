@@ -274,7 +274,6 @@ jobs:
             export CCACHE_NOHASHDIR=true
             export CCACHE_COMPILERCHECK=content
             make -j$(($(nproc) * 2)) target/linux/compile V=s 2>&1 | tee /workspace/logs/04-kernel-compile.log
-            make -j$(($(nproc) * 2)) target/linux/install V=s 2>&1 | tee -a /workspace/logs/04-kernel-compile.log
           '
 
       # ----------------------------------------------------------------
