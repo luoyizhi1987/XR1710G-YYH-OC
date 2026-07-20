@@ -11,6 +11,14 @@ on:
         options:
           - "false"
           - "true"
+      verbose:
+        description: "Verbose build output (V=c, shows every command)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions: write-all
 
@@ -18,7 +26,7 @@ jobs:
   build:
     name: Build firmware
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 300
+    timeout-minutes: 360
     env:
       DK_OPENWRT: /bld/openwrt
       DK_BIN: /bld/openwrt_bin
@@ -26,29 +34,35 @@ jobs:
       UPSTREAM_BRANCH: "xr1710g-6.18-integration"
       GH_TOKEN: ${{ github.token }}
       IMG_INC: ghcr.io/${{ github.repository_owner }}/xr1710g-yyh-oc:latest
+      # Note: we deliberately do NOT set a top-level JOBS env var.
+      # Each build step uses `make -j$(($(nproc) * 2))` inline so the
+      # parallelism is computed at the actual runner, not at the
+      # workflow-evaluation time on GitHub's side.  This also means a
+      # future switch to an 8/16-core runner picks up the extra cores
+      # for free.
 
     steps:
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       # 0. Checkout overlay repo.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       - uses: actions/checkout@v4
 
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       # 1. Login to GHCR for Docker image caching.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       # 2. Seed caches from previous build's Docker image.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       - name: Seed caches from previous build
         run: |
           set -eux
-          mkdir -p ccache stcache dlcache openwrt_bin
+          mkdir -p ccache stcache dlcache openwrt_bin logs
           docker pull "$IMG_INC" 2>&- || true
           if docker image inspect "$IMG_INC" >/dev/null 2>&1; then
             docker create --name CA "$IMG_INC" >/dev/null
@@ -61,28 +75,28 @@ jobs:
             echo "No previous build image found, starting fresh"
           fi
 
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       # 3. Wipe caches if requested.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       - name: Wipe caches (optional)
         if: github.event.inputs.clean_cache == 'true'
         run: |
           set -eux
-          rm -rf ccache stcache dlcache openwrt_bin
-          mkdir -p ccache stcache dlcache openwrt_bin
+          rm -rf ccache stcache dlcache openwrt_bin logs
+          mkdir -p ccache stcache dlcache openwrt_bin logs
           echo "Caches wiped"
 
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       # 4. Configure Docker daemon for speed.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       - name: Configure Docker
         run: |
           sudo tee /etc/docker/daemon.json <<< '{"max-concurrent-downloads":50,"max-concurrent-uploads":50,"experimental":true}'
           sudo systemctl reload docker
 
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       # 5. Start Docker container with mounted caches.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       - name: Start build container
         run: |
           set -eux
@@ -98,9 +112,15 @@ jobs:
             "$IMAGE"
           echo "Container started"
 
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
       # 6. Prepare OpenWrt source inside container.
-      # ------------------------------------------------------------------
+      #    - installs build dependencies
+      #    - installs Go >= 1.24.6 for the golang1.26 host feed
+      #    - clones upstream YYH2913 xr1710g-6.18-integration
+      #    - updates + installs all feeds
+      #    - applies the six overlay patches
+      #    - copies the OC config seed and runs `make defconfig`
+      # ----------------------------------------------------------------
       - name: Prepare OpenWrt source
         run: |
           docker exec -u 0 -i \
@@ -118,16 +138,14 @@ jobs:
               python3 python3-pip python3-venv libelf-dev libdw-dev \
               subversion mercurial cvs asciidoc w3m docbook-xsl xsltproc \
               automake autoconf libtool pkg-config cmake ninja-build \
-              aria2 jq time ccache golang-go patch
+              aria2 jq time ccache patch
 
-            # ---- XR1710G-YYH-OC fix: provide a Go >= 1.24.6 toolchain for ----
-            # ---- golang1.26 host bootstrap (apt's golang-go is too old).  ----
-            # v2ray-geoip/geosite pull in the golang1.26 host feed, whose
-            # dist bootstrap refuses any Go below 1.24.6 via
-            # src/cmd/dist/notgo124.go. Ubuntu 24.04's apt golang-go ships
-            # Go 1.22.x, which trips that gate. .config already points
-            # CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT at /usr/lib/go/, so we
-            # install a fresh official Go 1.24.6 (>= the gate) there.
+            # ---- Provide a Go >= 1.24.6 toolchain ----
+            # OpenWrt ships a golang1.26 host feed whose dist bootstrap
+            # refuses any Go below 1.24.6 (src/cmd/dist/notgo124.go).
+            # Ubuntu 24.04 apt golang-go is Go 1.22, which trips that
+            # gate.  .config points CONFIG_GOLANG_EXTERNAL_BOOTSTRAP_ROOT
+            # at /usr/lib/go, so we install a fresh official Go there.
             GO_BOOTSTRAP_VERSION="1.24.6"
             case "$(uname -m)" in
               x86_64)  GO_ARCH=amd64 ;;
@@ -146,7 +164,7 @@ jobs:
             hash -r
             echo "Installed host Go for golang1.26 bootstrap:"
             go version
-            test "$(go version | awk '{print $3}')" = "go${GO_BOOTSTRAP_VERSION}"
+            test "$(go version | awk "{print \$3}")" = "go${GO_BOOTSTRAP_VERSION}"
 
             mkdir -p /bld/openwrt_bin
             rm -rf /bld/openwrt
@@ -170,79 +188,173 @@ jobs:
             grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_kmod-ipsec|^CONFIG_ALL|^CONFIG_CCACHE|^CONFIG_PACKAGE_luci-theme-argon" .config || true
           '
 
-      # ------------------------------------------------------------------
-      # 7. Download sources.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
+      # 7. Download sources.  Parallel fetches shave a few minutes off
+      #    the cold-cache path; on a warm dlcache this is near-instant.
+      # ----------------------------------------------------------------
       - name: Download sources
         run: |
           docker exec -u 0 -i \
             -e DK_OPENWRT="${DK_OPENWRT}" \
-            -e DK_BIN="${DK_BIN}" \
             -e UPSTREAM_REPO="${UPSTREAM_REPO}" \
             -e UPSTREAM_BRANCH="${UPSTREAM_BRANCH}" \
-            -e GH_TOKEN="${GH_TOKEN}" \
             DK bash -c '
-            set -eux
+            set -euxo pipefail
             cd /bld/openwrt
-            make -j$(($(nproc) + 1)) download V=s 2>&1 | tail -20
+            mkdir -p /workspace/logs
+            make -j$(($(nproc) * 2)) download V=s 2>&1 | tee /workspace/logs/01-download.log
           '
 
-      # ------------------------------------------------------------------
-      # 8. Configure ccache and build (two-pass: V=c then V=s on failure).
-      # ------------------------------------------------------------------
-      - name: Compile OpenWrt
+      # ----------------------------------------------------------------
+      # 8. Build host tools.  Done as a separate step so an environment
+      #    problem (missing apt package, broken Go install, etc.) shows
+      #    up here instead of buried inside the main build log.
+      # ----------------------------------------------------------------
+      - name: Build host tools
         run: |
           docker exec -u 0 -i \
             -e DK_OPENWRT="${DK_OPENWRT}" \
-            -e DK_BIN="${DK_BIN}" \
-            -e UPSTREAM_REPO="${UPSTREAM_REPO}" \
-            -e UPSTREAM_BRANCH="${UPSTREAM_BRANCH}" \
-            -e GH_TOKEN="${GH_TOKEN}" \
             DK bash -c '
-            set -eux
+            set -euxo pipefail
+            cd /bld/openwrt
+            make -j$(($(nproc) * 2)) tools/install V=s 2>&1 | tee /workspace/logs/02-tools.log
+          '
+
+      # ----------------------------------------------------------------
+      # 9. Build cross-compile toolchain.  Same logic as tools: surface
+      #    the error early instead of inside the big main-build step.
+      # ----------------------------------------------------------------
+      - name: Build cross-compile toolchain
+        run: |
+          docker exec -u 0 -i \
+            -e DK_OPENWRT="${DK_OPENWRT}" \
+            DK bash -c '
+            set -euxo pipefail
+            cd /bld/openwrt
+            make -j$(($(nproc) * 2)) toolchain/install V=s 2>&1 | tee /workspace/logs/03-toolchain.log
+          '
+
+      # ----------------------------------------------------------------
+      # 10. Configure ccache.  The OC config seed already sets
+      #     CONFIG_CCACHE=y, so the sed that used to flip it here is
+      #     gone.  We just prime the cache size + stats.
+      # ----------------------------------------------------------------
+      - name: Configure ccache
+        run: |
+          docker exec -u 0 -i DK bash -c '
+            set -euxo pipefail
+            export CCACHE_DIR=/ccache
+            export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
+            export CCACHE_NOHASHDIR=true
+            export CCACHE_COMPILERCHECK=content
+            ccache -M 5G
+            ccache -z
+            ccache -s
+          '
+
+      # ----------------------------------------------------------------
+      # 11. Compile kernel + modules.
+      #     This is the slowest single stage (kernel is the bulk of the
+      #     cold-cache cost).  We run it as its own step so the timing
+      #     shows up in the Actions UI and a kernel failure is obvious.
+      # ----------------------------------------------------------------
+      - name: Compile kernel
+        run: |
+          docker exec -u 0 -i \
+            -e DK_OPENWRT="${DK_OPENWRT}" \
+            DK bash -c '
+            set -euxo pipefail
             cd /bld/openwrt
             export FORCE_UNSAFE_CONFIGURE=1
             export CCACHE_DIR=/ccache
             export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
             export CCACHE_NOHASHDIR=true
             export CCACHE_COMPILERCHECK=content
+            make -j$(($(nproc) * 2)) target/linux/compile V=s 2>&1 | tee /workspace/logs/04-kernel-compile.log
+            make -j$(($(nproc) * 2)) target/linux/install V=s 2>&1 | tee -a /workspace/logs/04-kernel-compile.log
+          '
 
-            sed -i "s/# CONFIG_CCACHE is not set/CONFIG_CCACHE=y/" .config
-            ccache -M 5G
-            ccache -z
+      # ----------------------------------------------------------------
+      # 12. Compile + install packages.
+      #     Splitting compile from install lets a package install
+      #     failure (rootfs collision, missing postinst hook, etc.)
+      #     show up distinctly from a compile failure.
+      # ----------------------------------------------------------------
+      - name: Compile packages
+        run: |
+          docker exec -u 0 -i \
+            -e DK_OPENWRT="${DK_OPENWRT}" \
+            DK bash -c '
+            set -euxo pipefail
+            cd /bld/openwrt
+            export FORCE_UNSAFE_CONFIGURE=1
+            export CCACHE_DIR=/ccache
+            export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
+            export CCACHE_NOHASHDIR=true
+            export CCACHE_COMPILERCHECK=content
+            make -j$(($(nproc) * 2)) package/compile V=s 2>&1 | tee /workspace/logs/05-package-compile.log
+            make -j$(($(nproc) * 2)) target/compile  V=s 2>&1 | tee -a /workspace/logs/05-package-compile.log
+          '
 
-            make -j$(($(nproc) + 1)) tools/install V=s 2>&1 | tail -20
-            make -j$(($(nproc) + 1)) toolchain/install V=s 2>&1 | tail -20
+      - name: Install packages
+        run: |
+          docker exec -u 0 -i \
+            -e DK_OPENWRT="${DK_OPENWRT}" \
+            DK bash -c '
+            set -euxo pipefail
+            cd /bld/openwrt
+            export FORCE_UNSAFE_CONFIGURE=1
+            make -j$(($(nproc) * 2)) package/install V=s 2>&1 | tee /workspace/logs/06-package-install.log
+            make -j$(($(nproc) * 2)) target/install  V=s 2>&1 | tee -a /workspace/logs/06-package-install.log
+          '
 
-            for mode in c s; do
-              make -j$(($(nproc) + 1)) V=$mode && break
-            done
-
+      # ----------------------------------------------------------------
+      # 13. Build rootfs + image.
+      # ----------------------------------------------------------------
+      - name: Build firmware image
+        run: |
+          docker exec -u 0 -i \
+            -e DK_OPENWRT="${DK_OPENWRT}" \
+            -e DK_BIN="${DK_BIN}" \
+            DK bash -c '
+            set -euxo pipefail
+            cd /bld/openwrt
+            make -j$(($(nproc) * 2)) package/rootfs V=s 2>&1 | tee /workspace/logs/07-rootfs.log
+            make -j$(($(nproc) * 2)) target/image    V=s 2>&1 | tee /workspace/logs/08-image.log
             ccache -s
           '
 
-      # ------------------------------------------------------------------
-      # 9. Collect artifacts.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
+      # 14. Collect artifacts.
+      #     Always runs, so the firmware + manifest + per-stage logs are
+      #     available even if a later step blew up.  If the image step
+      #     failed the logs are the only useful debug handle.
+      # ----------------------------------------------------------------
       - name: Collect artifacts
         if: always()
         run: |
           set -eux
-          sudo chown -R "$(id -u):$(id -g)" openwrt_bin stcache ccache dlcache 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" openwrt_bin stcache ccache dlcache logs 2>/dev/null || true
           mkdir -p artifacts
           {
             echo "Build date: $(date -u)"
             echo "Upstream repo: ${UPSTREAM_REPO}"
             echo "Upstream branch: ${UPSTREAM_BRANCH}"
             echo "Runner: $(uname -m)"
+            echo "Verbose: ${{ github.event.inputs.verbose }}"
           } > artifacts/BUILD_INFO.txt
           cp -v openwrt_bin/targets/airoha/an7581/*xr1710g* artifacts/ 2>/dev/null || true
           cp -v openwrt_bin/targets/airoha/an7581/*.manifest artifacts/ 2>/dev/null || true
+          # Per-stage logs are useful for post-mortem of any failure.
+          if [ -d logs ] && ls logs/*.log >/dev/null 2>&1; then
+            mkdir -p artifacts/logs
+            cp -v logs/*.log artifacts/logs/ 2>/dev/null || true
+          fi
           ls -la artifacts/
 
-      # ------------------------------------------------------------------
-      # 10. Upload artifacts.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
+      # 15. Upload artifacts.
+      # ----------------------------------------------------------------
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -252,9 +364,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      # ------------------------------------------------------------------
-      # 11. Publish to GitHub Releases (only on success).
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
+      # 16. Publish to GitHub Releases (only on success).
+      # ----------------------------------------------------------------
       - name: Publish to GitHub Releases
         if: success()
         run: |
@@ -274,9 +386,9 @@ jobs:
             --notes "ARM native build. Upload *.itb via LuCI > System > Backup/Flash Firmware."
           echo "Release created: ${TAG}"
 
-      # ------------------------------------------------------------------
-      # 12. Save build state as Docker image for next run.
-      # ------------------------------------------------------------------
+      # ----------------------------------------------------------------
+      # 17. Save build state as Docker image for next run.
+      # ----------------------------------------------------------------
       - name: Save build image
         if: always()
         run: |

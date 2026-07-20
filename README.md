@@ -26,6 +26,16 @@ branch, with three customisations applied on top:
    See [`patches/003-drop-glass-add-argon-theme.patch`](patches/003-drop-glass-add-argon-theme.patch)
    and [`patches/004-add-upnp-v2ray-geo-packages.patch`](patches/004-add-upnp-v2ray-geo-packages.patch).
 
+4. **Build-system fixes that keep full firmware functionality**:
+   * `patches/005-kernel-olddefconfig-resolve-new-symbols.patch` — runs
+     `make olddefconfig` after the kernel config fragments are concatenated,
+     so the `IXGBE_IPSEC` (and similar) `NEW` symbols that show up when
+     `CONFIG_ALL_KMODS=y` pulls in every kmod are resolved to their defaults
+     instead of aborting `syncconfig` in non-interactive mode.
+   * `patches/006-add-argon-theme-feed.patch` — adds the
+     `jerrykuku/luci-theme-argon` feed so `make defconfig` can resolve
+     `luci-theme-argon` (which is not in the stock OpenWrt feeds).
+
 The build also enables the following kernel options as requested:
 
 ```
@@ -47,16 +57,29 @@ The GitHub Actions workflow (`.github/workflows/build.yml`) is **manual trigger
 only** (`workflow_dispatch`). Each run:
 
 1. Clones the latest `YYH2913/openwrt` `xr1710g-6.18-integration` branch.
-2. Applies the four overlay patches in numeric order via
+2. Applies the six overlay patches in numeric order via
    `scripts/apply-patches.sh` (idempotent: re-running on an already-patched
    tree is a no-op).
-3. Seeds `.config` from [`config/xr1710g-oc.conf`](config/xr1710g-oc.conf).
-4. Updates and installs all upstream feeds (no feed is removed).
+3. Seeds `.config` from [`config/xr1710g-oc.conf`](config/xr1710g-oc.conf)
+   (ccache, OC governor, all the user-requested packages + kernel options
+   are pre-selected).
+4. Updates and installs all upstream feeds (no feed is removed) plus the
+   Argon-theme feed added by patch 006.
 5. Runs `make defconfig` to expand the config.
-6. Downloads all sources (`make download`).
-7. Builds the toolchain, then the full target.
-8. Uploads the firmware images, manifest, and full `.config` as a GitHub
-   Actions artifact.
+6. Downloads all sources (`make download`, parallel).
+7. Builds the toolchain, kernel and packages in **stages** — each stage
+   has its own log file under `artifacts/logs/` so a failure points to a
+   specific phase (host tools, toolchain, kernel, packages, image) rather
+   than a single opaque wall of text.  `make -j$(nproc*2)` oversubscribes
+   the 4-core ARM runner; OpenWrt's single-threaded link steps are
+   already guarded, so this is safe.
+8. ccache is enabled in `.config` and primed at the start of the build.
+   It is mounted from the runner bind-mount and saved back into the
+   `ghcr.io/.../xr1710g-yyh-oc:latest` Docker image at the end of each
+   run, so subsequent runs (with a warm dlcache + ccache) are much
+   faster than a cold build.
+9. Uploads the firmware images, manifest, `.config` snapshot, and the
+   per-stage build logs as a GitHub Actions artifact.
 
 ## Repository layout
 
@@ -69,7 +92,9 @@ only** (`workflow_dispatch`). Each run:
 │   ├── 001-txpower-30dbm-5ghz-unii1.patch
 │   ├── 002-oc-overclock-200mhz-performance-governor.patch
 │   ├── 003-drop-glass-add-argon-theme.patch
-│   └── 004-add-upnp-v2ray-geo-packages.patch
+│   ├── 004-add-upnp-v2ray-geo-packages.patch
+│   ├── 005-kernel-olddefconfig-resolve-new-symbols.patch
+│   └── 006-add-argon-theme-feed.patch
 ├── scripts/
 │   └── apply-patches.sh          # idempotent patch applicator
 └── README.md
