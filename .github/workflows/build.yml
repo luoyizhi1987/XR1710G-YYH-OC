@@ -208,12 +208,17 @@ jobs:
             # 3. Update only the newly-added argon feed.
             #    Do NOT run 'feeds update -a' again — it would git-pull
             #    the packages feed and overwrite patch 007's Makefile edit.
-            ./scripts/feeds update argon || true
+            echo "=== Debug: checking scripts/feeds ==="
+            pwd
+            ls -la scripts/feeds
+            file scripts/feeds 2>/dev/null || true
+            head -1 scripts/feeds 2>/dev/null || true
+            perl scripts/feeds update argon || true
 
             # 4. Install all feeds (creates symlinks, does NOT copy files,
             #    so patch 007's edit to feeds/packages/.../Makefile is
             #    preserved).
-            ./scripts/feeds install -a
+            perl scripts/feeds install -a
 
             # 5. Re-apply patch 007 (v2ray-geodata version bump) in case
             #    step 1's feeds update overwrote it via git-pull.
