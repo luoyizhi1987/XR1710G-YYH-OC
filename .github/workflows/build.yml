@@ -403,10 +403,13 @@ jobs:
           cp -v openwrt_bin/targets/airoha/an7581/*xr1710g*.itb release-assets/ 2>/dev/null || true
           cp -v openwrt_bin/targets/airoha/an7581/*xr1710g*.bin release-assets/ 2>/dev/null || true
           cp -v openwrt_bin/targets/airoha/an7581/*.manifest release-assets/ 2>/dev/null || true
-          if ! ls release-assets/*.itb release-assets/*.bin 2>/dev/null | grep -q .; then
-            echo "ERROR: No firmware image found"
+          # Check if any firmware image exists (.itb or .bin)
+          if ! ls release-assets/*.itb 2>/dev/null | grep -q .; then
+            echo "ERROR: No .itb firmware image found"
             exit 1
           fi
+          echo "=== Firmware images to publish ==="
+          ls -lh release-assets/
           TAG="xr1710g-yyh-oc-$(date -u '+%Y%m%d-%H%M%S')"
           gh release create "${TAG}" release-assets/* \
             --title "XR1710G-YYH-OC $(date -u '+%Y-%m-%d %H:%M')" \
