@@ -199,12 +199,28 @@ jobs:
             #    git-pull on each feed.
             ./scripts/feeds update -a
 
-            # 2. Apply overlay patches:
+            # 2. Apply overlay patches (inline, not via apply-patches.sh):
             #    - patch 006 adds the argon feed to feeds.conf.default
             #    - patch 007 updates v2ray-geodata Makefile (version bump)
             #    - other patches modify kernel/target/package files
             echo "=== Before apply-patches: pwd=$(pwd) ==="
-            /workspace/scripts/apply-patches.sh /bld/openwrt
+            for p in /workspace/patches/*.patch; do
+              name=$(basename "$p")
+              echo "--- applying $name"
+              if patch -p1 --forward --no-backup-if-mismatch < "$p" 2>&1; then
+                echo "    OK (patch)"
+              elif git apply --3way --whitespace=nowarn "$p" 2>&1; then
+                echo "    OK (git apply --3way)"
+              else
+                if patch -p1 --reverse --forward --no-backup-if-mismatch < "$p" >/dev/null 2>&1; then
+                  echo "    SKIP (already applied)"
+                  patch -p1 --forward --no-backup-if-mismatch < "$p" >/dev/null 2>&1 || true
+                else
+                  echo "    FAIL"
+                  head -20 "$p" || true
+                fi
+              fi
+            done
             echo "=== After apply-patches: pwd=$(pwd) ==="
             cd /bld/openwrt
             echo "=== After cd /bld/openwrt: pwd=$(pwd) ==="
