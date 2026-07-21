@@ -122,14 +122,16 @@ jobs:
             -e GH_TOKEN="${GH_TOKEN}" \
             DK bash -euxc '
             # ---- Install build dependencies (idempotent) ----
-            # Clean stale apt cache first (Docker image may have old indexes
-            # pointing to removed packages like libarchive13t64_3.7.2-2ubuntu0.8)
+            # Clean stale apt cache and upgrade to fix removed packages
+            # (libarchive13t64_3.7.2-2ubuntu0.8 was removed from mirrors)
             rm -rf /var/lib/apt/lists/*
             for i in 1 2 3; do
               apt-get update -qq && break
               echo "apt-get update attempt $i failed, retrying..."
               sleep 5
             done
+            # Upgrade installed packages to latest versions (fixes stale .deb refs)
+            apt-get upgrade -y --no-install-recommends || true
             apt-get install -y --no-install-recommends --fix-missing \
               build-essential clang flex bison g++ gawk \
               gettext git libncurses-dev libssl-dev python3-dev python3-setuptools \
