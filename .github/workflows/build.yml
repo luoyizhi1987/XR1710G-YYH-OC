@@ -355,13 +355,19 @@ jobs:
             set -euxo pipefail
             cd /bld/openwrt
             export FORCE_UNSAFE_CONFIGURE=1
+
+            # package/rootfs with V=s on failure for diagnostics
             make -j$(($(nproc) * 2)) package/rootfs > /workspace/logs/07-rootfs.log 2>&1 || {
-              echo "=== Rootfs build FAILED, last 100 lines: ==="
+              echo "=== Rootfs build FAILED, re-running with V=s for diagnostics ==="
+              make -j1 V=s package/rootfs 2>&1 | tail -200
+              echo "=== Rootfs build FAILED, last 100 lines of original log: ==="
               tail -100 /workspace/logs/07-rootfs.log
               exit 1
             }
             make -j$(($(nproc) * 2)) target/image >> /workspace/logs/08-image.log 2>&1 || {
-              echo "=== Image build FAILED, last 100 lines: ==="
+              echo "=== Image build FAILED, re-running with V=s for diagnostics ==="
+              make -j1 V=s target/image 2>&1 | tail -200
+              echo "=== Image build FAILED, last 100 lines of original log: ==="
               tail -100 /workspace/logs/08-image.log
               exit 1
             }
