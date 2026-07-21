@@ -203,7 +203,11 @@ jobs:
             #    - patch 006 adds the argon feed to feeds.conf.default
             #    - patch 007 updates v2ray-geodata Makefile (version bump)
             #    - other patches modify kernel/target/package files
+            echo "=== Before apply-patches: pwd=$(pwd) ==="
             /workspace/scripts/apply-patches.sh /bld/openwrt
+            echo "=== After apply-patches: pwd=$(pwd) ==="
+            cd /bld/openwrt
+            echo "=== After cd /bld/openwrt: pwd=$(pwd) ==="
 
             # 3. Update only the newly-added argon feed.
             #    Do NOT run 'feeds update -a' again — it would git-pull
