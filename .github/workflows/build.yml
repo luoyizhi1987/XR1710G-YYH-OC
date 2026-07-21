@@ -122,7 +122,9 @@ jobs:
             -e GH_TOKEN="${GH_TOKEN}" \
             DK bash -euxc '
             # ---- Install build dependencies (idempotent) ----
-            # Retry apt-get update to handle transient mirror issues
+            # Clean stale apt cache first (Docker image may have old indexes
+            # pointing to removed packages like libarchive13t64_3.7.2-2ubuntu0.8)
+            rm -rf /var/lib/apt/lists/*
             for i in 1 2 3; do
               apt-get update -qq && break
               echo "apt-get update attempt $i failed, retrying..."
