@@ -203,7 +203,7 @@ jobs:
             #    - patch 006 adds the argon feed to feeds.conf.default
             #    - patch 007 updates v2ray-geodata Makefile (version bump)
             #    - other patches modify kernel/target/package files
-            echo "=== Before apply-patches: pwd=$(pwd) ==="
+            echo "=== Before apply-patches: hostname=$(hostname) pwd=$(pwd) ==="
             for p in /workspace/patches/*.patch; do
               name=$(basename "$p")
               echo "--- applying $name"
@@ -221,9 +221,9 @@ jobs:
                 fi
               fi
             done
-            echo "=== After apply-patches: pwd=$(pwd) ==="
-            cd /bld/openwrt
-            echo "=== After cd /bld/openwrt: pwd=$(pwd) ==="
+            echo "=== After apply-patches: hostname=$(hostname) pwd=$(pwd) ==="
+            cd /bld/openwrt || { echo "ERROR: cd /bld/openwrt failed"; exit 1; }
+            echo "=== After cd /bld/openwrt: hostname=$(hostname) pwd=$(pwd) ==="
 
             # 3. Update only the newly-added argon feed.
             #    Do NOT run 'feeds update -a' again — it would git-pull
