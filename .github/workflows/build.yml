@@ -194,11 +194,31 @@ jobs:
             ln -sf /dlcache dl
 
             # ---- Update and install feeds ----
+            # 1. Initial update: clones all feeds from feeds.conf.default
+            #    If feeds/ already exists (from Docker image), this does
+            #    git-pull on each feed.
             ./scripts/feeds update -a
+
+            # 2. Apply overlay patches:
+            #    - patch 006 adds the argon feed to feeds.conf.default
+            #    - patch 007 updates v2ray-geodata Makefile (version bump)
+            #    - other patches modify kernel/target/package files
+            /workspace/scripts/apply-patches.sh /bld/openwrt
+
+            # 3. Update only the newly-added argon feed.
+            #    Do NOT run 'feeds update -a' again — it would git-pull
+            #    the packages feed and overwrite patch 007's Makefile edit.
+            ./scripts/feeds update argon || true
+
+            # 4. Install all feeds (creates symlinks, does NOT copy files,
+            #    so patch 007's edit to feeds/packages/.../Makefile is
+            #    preserved).
             ./scripts/feeds install -a
 
-            # ---- Apply overlay patches ----
-            /workspace/scripts/apply-patches.sh /bld/openwrt
+            # 5. Re-apply patch 007 (v2ray-geodata version bump) in case
+            #    step 1's feeds update overwrote it via git-pull.
+            #    This is idempotent: if already applied, patch will skip.
+            patch -p1 --forward --no-backup-if-mismatch < /workspace/patches/007-update-v2ray-geodata-versions.patch || true
 
             # ---- Configure ----
             cp /workspace/config/xr1710g-oc.conf .config
@@ -210,8 +230,10 @@ jobs:
 
       # ----------------------------------------------------------------
       # 7. Download sources.
-      #    Non-fatal: some sources may be temporarily unavailable.
-      #    Output goes to a log file (no V=s, no tee = much faster).
+      #    FATAL: if any source fails to download, the subsequent
+      #    package/compile step will fail with a cryptic error.
+      #    Retry up to 3 times to handle transient network issues.
+      #    On final failure, re-run with V=s to show the actual error.
       # ----------------------------------------------------------------
       - name: Download sources
         run: |
@@ -219,11 +241,20 @@ jobs:
             set -euxo pipefail
             cd /bld/openwrt
             export FORCE_UNSAFE_CONFIGURE=1
-            make -j$(($(nproc) * 2)) download > /workspace/logs/01-download.log 2>&1 || {
-              echo "=== Download completed with some errors (non-fatal) ==="
-              tail -30 /workspace/logs/01-download.log
-            }
-            echo "=== Download step done ==="
+
+            for attempt in 1 2 3; do
+              echo "=== Download attempt $attempt/3 ==="
+              if make -j$(($(nproc) * 2)) download > /workspace/logs/01-download.log 2>&1; then
+                echo "=== Download completed successfully ==="
+                exit 0
+              fi
+              echo "=== Download attempt $attempt failed, retrying... ==="
+              sleep 10
+            done
+
+            echo "=== Download FAILED after 3 attempts, re-running with V=s ==="
+            make -j1 V=s download 2>&1 | tail -200
+            exit 1
           '
 
       # ----------------------------------------------------------------
@@ -303,6 +334,7 @@ jobs:
 
       # ----------------------------------------------------------------
       # 12. Compile + install packages.
+      #     On failure, re-run with V=s to show the actual error.
       # ----------------------------------------------------------------
       - name: Compile packages
         run: |
@@ -315,12 +347,16 @@ jobs:
             export CCACHE_NOHASHDIR=true
             export CCACHE_COMPILERCHECK=content
             make -j$(($(nproc) * 2)) package/compile > /workspace/logs/05-package-compile.log 2>&1 || {
-              echo "=== Package compile FAILED, last 100 lines: ==="
+              echo "=== Package compile FAILED, re-running with V=s for diagnostics ==="
+              make -j1 V=s package/compile 2>&1 | tail -300
+              echo "=== Package compile FAILED, last 100 lines of original log: ==="
               tail -100 /workspace/logs/05-package-compile.log
               exit 1
             }
             make -j$(($(nproc) * 2)) target/compile >> /workspace/logs/05-package-compile.log 2>&1 || {
-              echo "=== Target compile FAILED, last 100 lines: ==="
+              echo "=== Target compile FAILED, re-running with V=s for diagnostics ==="
+              make -j1 V=s target/compile 2>&1 | tail -300
+              echo "=== Target compile FAILED, last 100 lines of original log: ==="
               tail -100 /workspace/logs/05-package-compile.log
               exit 1
             }
