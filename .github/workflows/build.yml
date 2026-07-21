@@ -108,13 +108,9 @@ jobs:
 
       # ----------------------------------------------------------------
       # 6. Prepare OpenWrt source inside container.
-      #    - installs build dependencies (idempotent, fast if present)
-      #    - installs Go >= 1.24.6 only if not already present
-      #    - INCREMENTAL source update: git fetch + reset (not rm + clone)
-      #      This preserves build_dir and staging_dir across runs.
-      #    - updates + installs all feeds
-      #    - applies the overlay patches
-      #    - copies the OC config seed and runs `make defconfig`
+      #    Uses a standalone script to avoid YAML single-quote escaping
+      #    issues that caused $(pwd) to be expanded on the runner instead
+      #    of inside the container.
       # ----------------------------------------------------------------
       - name: Prepare OpenWrt source
         run: |
@@ -162,95 +158,9 @@ jobs:
 
             mkdir -p /bld/openwrt_bin
             mkdir -p /bld/openwrt
-            cd /bld/openwrt
 
-            # ---- Incremental source update ----
-            # If .git exists, fetch + reset (preserves build_dir, staging_dir
-            # which are in .gitignore).  Otherwise fresh clone.
-            if [ -d .git ]; then
-              echo "=== Incremental source update ==="
-              git remote set-url origin "$UPSTREAM_REPO" 2>/dev/null || git remote add origin "$UPSTREAM_REPO"
-              git fetch --depth=1 origin "$UPSTREAM_BRANCH"
-              git reset --hard "origin/$UPSTREAM_BRANCH"
-              # Remove untracked files but KEEP ignored ones (build_dir, staging_dir, etc.)
-              git clean -fd
-            else
-              echo "=== Fresh clone ==="
-              git clone --depth=1 --branch="$UPSTREAM_BRANCH" "$UPSTREAM_REPO" .
-            fi
-            git log -1 --format="Upstream HEAD: %H %s (%ci)"
-
-            # ---- Set up symlinks for volumes ----
-            # bin -> /bld/openwrt_bin (volume, ephemeral, holds final images)
-            # dl  -> /dlcache (volume, restored from GH cache)
-            # staging_dir is a REAL directory (persists in Docker image)
-            # build_dir is a REAL directory (persists in Docker image)
-            if [ -L staging_dir ]; then
-              echo "Removing old staging_dir symlink (transition from old workflow)"
-              rm -f staging_dir
-            fi
-            rm -rf bin dl 2>/dev/null || true
-            ln -sf /bld/openwrt_bin bin
-            ln -sf /dlcache dl
-
-            # ---- Update and install feeds ----
-            # 1. Initial update: clones all feeds from feeds.conf.default
-            #    If feeds/ already exists (from Docker image), this does
-            #    git-pull on each feed.
-            ./scripts/feeds update -a
-
-            # 2. Apply overlay patches (inline, not via apply-patches.sh):
-            #    - patch 006 adds the argon feed to feeds.conf.default
-            #    - patch 007 updates v2ray-geodata Makefile (version bump)
-            #    - other patches modify kernel/target/package files
-            echo "=== Before apply-patches: hostname=$(hostname) pwd=$(pwd) ==="
-            for p in /workspace/patches/*.patch; do
-              name=$(basename "$p")
-              echo "--- applying $name"
-              if patch -p1 --forward --no-backup-if-mismatch < "$p" 2>&1; then
-                echo "    OK (patch)"
-              elif git apply --3way --whitespace=nowarn "$p" 2>&1; then
-                echo "    OK (git apply --3way)"
-              else
-                if patch -p1 --reverse --forward --no-backup-if-mismatch < "$p" >/dev/null 2>&1; then
-                  echo "    SKIP (already applied)"
-                  patch -p1 --forward --no-backup-if-mismatch < "$p" >/dev/null 2>&1 || true
-                else
-                  echo "    FAIL"
-                  head -20 "$p" || true
-                fi
-              fi
-            done
-            echo "=== After apply-patches: hostname=$(hostname) pwd=$(pwd) ==="
-            cd /bld/openwrt || { echo "ERROR: cd /bld/openwrt failed"; exit 1; }
-            echo "=== After cd /bld/openwrt: hostname=$(hostname) pwd=$(pwd) ==="
-
-            # 3. Update only the newly-added argon feed.
-            #    Do NOT run 'feeds update -a' again — it would git-pull
-            #    the packages feed and overwrite patch 007's Makefile edit.
-            echo "=== Debug: checking scripts/feeds ==="
-            pwd
-            ls -la scripts/feeds
-            file scripts/feeds 2>/dev/null || true
-            head -1 scripts/feeds 2>/dev/null || true
-            perl scripts/feeds update argon || true
-
-            # 4. Install all feeds (creates symlinks, does NOT copy files,
-            #    so patch 007's edit to feeds/packages/.../Makefile is
-            #    preserved).
-            perl scripts/feeds install -a
-
-            # 5. Re-apply patch 007 (v2ray-geodata version bump) in case
-            #    step 1's feeds update overwrote it via git-pull.
-            #    This is idempotent: if already applied, patch will skip.
-            patch -p1 --forward --no-backup-if-mismatch < /workspace/patches/007-update-v2ray-geodata-versions.patch || true
-
-            # ---- Configure ----
-            cp /workspace/config/xr1710g-oc.conf .config
-            make defconfig
-
-            echo "=== Key config selections ==="
-            grep -E "^CONFIG_TARGET|^CONFIG_PACKAGE_kmod-ipsec|^CONFIG_ALL|^CONFIG_CCACHE|^CONFIG_PACKAGE_luci-theme-argon|^# CONFIG_PACKAGE_nftables-nojson|^# CONFIG_PACKAGE_golang-bootstrap" .config || true
+            # ---- Run the prepare script ----
+            bash /workspace/scripts/prepare-source.sh
           '
 
       # ----------------------------------------------------------------
