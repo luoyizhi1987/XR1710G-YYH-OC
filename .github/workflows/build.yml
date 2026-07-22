@@ -20,34 +20,21 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     env:
-      DK_OPENWRT: /bld/openwrt
-      DK_BIN: /bld/openwrt_bin
       UPSTREAM_REPO: "https://github.com/YYH2913/openwrt.git"
       UPSTREAM_BRANCH: "xr1710g-6.18-integration"
       GH_TOKEN: ${{ github.token }}
       IMG_INC: ghcr.io/${{ github.repository_owner }}/xr1710g-yyh-oc:latest
 
     steps:
-      # ----------------------------------------------------------------
-      # 0. Checkout overlay repo.
-      # ----------------------------------------------------------------
       - uses: actions/checkout@v4
 
-      # ----------------------------------------------------------------
-      # 1. Login to GHCR for Docker image caching.
-      # ----------------------------------------------------------------
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      # ----------------------------------------------------------------
-      # 2. Restore ccache + dl from GitHub Actions cache.
-      #    These are small enough for GH cache (10 GB limit) and much
-      #    more reliable than embedding them in the Docker image.
-      # ----------------------------------------------------------------
-      - name: Restore ccache and dl caches
+      - name: Restore caches
         uses: actions/cache@v4
         with:
           path: |
@@ -57,46 +44,14 @@ jobs:
           restore-keys: |
             openwrt-ccache-dl-
 
-      # ----------------------------------------------------------------
-      # 3. Wipe caches if requested.
-      # ----------------------------------------------------------------
       - name: Wipe caches (optional)
         if: github.event.inputs.clean_cache == 'true'
-        run: |
-          set -eux
-          rm -rf ccache dlcache
-          mkdir -p ccache dlcache openwrt_bin logs
-          echo "Caches wiped"
+        run: rm -rf ccache dlcache && mkdir -p ccache dlcache openwrt_bin logs
 
-      # ----------------------------------------------------------------
-      # 4. Configure Docker daemon for speed.
-      # ----------------------------------------------------------------
-      - name: Configure Docker
+      - name: Start container
         run: |
-          sudo tee /etc/docker/daemon.json <<< '{"max-concurrent-downloads":50,"max-concurrent-uploads":50,"experimental":true}'
-          sudo systemctl reload docker
-
-      # ----------------------------------------------------------------
-      # 5. Start Docker container.
-      #    The Docker image (IMG_INC) carries the heavy state across
-      #    runs: apt packages, Go toolchain, OpenWrt source tree,
-      #    staging_dir (compiled toolchain + libs), and build_dir
-      #    (intermediate objects).  Only ccache and dl are external
-      #    (GitHub Actions cache) because they are small and benefit
-      #    from GH's dedup.
-      #
-      #    Key difference from the old workflow: staging_dir is now a
-      #    REAL directory inside /bld/openwrt (not a symlink to a
-      #    volume).  This means it is captured by `docker commit` and
-      #    survives across runs, saving 30-60 min of toolchain build
-      #    time on every run after the first.
-      # ----------------------------------------------------------------
-      - name: Start build container
-        run: |
-          set -eux
           IMAGE="$IMG_INC"
           docker image inspect "$IMAGE" >/dev/null 2>&1 || IMAGE="ubuntu:24.04"
-          echo "Using image: $IMAGE"
           mkdir -p ccache dlcache openwrt_bin logs
           docker run -dt --name DK \
             -v "$PWD/ccache":/ccache \
@@ -104,33 +59,19 @@ jobs:
             -v "$PWD/openwrt_bin":/bld/openwrt_bin \
             -v "$PWD":/workspace \
             "$IMAGE"
-          echo "Container started"
 
-      # ----------------------------------------------------------------
-      # 6. Prepare OpenWrt source inside container.
-      #    Uses a standalone script to avoid YAML single-quote escaping
-      #    issues that caused $(pwd) to be expanded on the runner instead
-      #    of inside the container.
-      # ----------------------------------------------------------------
-      - name: Prepare OpenWrt source
+      # ================================================================
+      # Phase 1: Prepare source (install deps, clone/update, patches,
+      #          feeds, config, force kernel rebuild for OC patch)
+      # ================================================================
+      - name: Prepare source
         run: |
           docker exec -u 0 -i \
-            -e DK_OPENWRT="${DK_OPENWRT}" \
-            -e DK_BIN="${DK_BIN}" \
             -e UPSTREAM_REPO="${UPSTREAM_REPO}" \
             -e UPSTREAM_BRANCH="${UPSTREAM_BRANCH}" \
-            -e GH_TOKEN="${GH_TOKEN}" \
             DK bash -euxc '
-            # ---- Install build dependencies (idempotent) ----
-            # Clean stale apt cache and upgrade to fix removed packages
-            # (libarchive13t64_3.7.2-2ubuntu0.8 was removed from mirrors)
             rm -rf /var/lib/apt/lists/*
-            for i in 1 2 3; do
-              apt-get update -qq && break
-              echo "apt-get update attempt $i failed, retrying..."
-              sleep 5
-            done
-            # Upgrade installed packages to latest versions (fixes stale .deb refs)
+            for i in 1 2 3; do apt-get update -qq && break; sleep 5; done
             apt-get upgrade -y --no-install-recommends || true
             apt-get install -y --no-install-recommends --fix-missing \
               build-essential clang flex bison g++ gawk \
@@ -141,293 +82,115 @@ jobs:
               automake autoconf libtool pkg-config cmake ninja-build \
               aria2 jq time ccache patch
 
-            # ---- Install Go 1.24.6 if not already present ----
-            GO_BOOTSTRAP_VERSION="1.24.6"
-            if ! go version 2>/dev/null | grep -q "go${GO_BOOTSTRAP_VERSION}"; then
-              echo "Installing Go ${GO_BOOTSTRAP_VERSION}..."
-              case "$(uname -m)" in
-                x86_64)  GO_ARCH=amd64 ;;
-                aarch64) GO_ARCH=arm64 ;;
-                *)       GO_ARCH=arm64 ;;
-              esac
-              GO_TARBALL="go${GO_BOOTSTRAP_VERSION}.linux-${GO_ARCH}.tar.gz"
-              curl -fsSL --retry 3 "https://go.dev/dl/${GO_TARBALL}" -o "/tmp/${GO_TARBALL}"
-              rm -rf /usr/lib/go /usr/local/go
-              tar -C /usr/lib -xzf "/tmp/${GO_TARBALL}"
-              rm -f "/tmp/${GO_TARBALL}"
-              ln -sf /usr/lib/go/bin/go    /usr/local/bin/go
+            GO_VER="1.24.6"
+            if ! go version 2>/dev/null | grep -q "go${GO_VER}"; then
+              case "$(uname -m)" in x86_64) A=amd64;; *) A=arm64;; esac
+              curl -fsSL "https://go.dev/dl/go${GO_VER}.linux-${A}.tar.gz" -o /tmp/go.tar.gz
+              rm -rf /usr/lib/go && tar -C /usr/lib -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz
+              ln -sf /usr/lib/go/bin/go /usr/local/bin/go
               ln -sf /usr/lib/go/bin/gofmt /usr/local/bin/gofmt
-            else
-              echo "Go ${GO_BOOTSTRAP_VERSION} already installed, skipping"
             fi
-            export GOROOT=/usr/lib/go
-            export PATH="/usr/lib/go/bin:${PATH}"
-            hash -r
-            go version
-
-            mkdir -p /bld/openwrt_bin
-            mkdir -p /bld/openwrt
-
-            # ---- Run the prepare script ----
+            export GOROOT=/usr/lib/go PATH="/usr/lib/go/bin:$PATH"
+            mkdir -p /bld/openwrt_bin /bld/openwrt
             bash /workspace/scripts/prepare-source.sh
           '
 
-      # ----------------------------------------------------------------
-      # 7. Download sources.
-      #    FATAL: if any source fails to download, the subsequent
-      #    package/compile step will fail with a cryptic error.
-      #    Retry up to 3 times to handle transient network issues.
-      #    On final failure, re-run with V=s to show the actual error.
-      # ----------------------------------------------------------------
-      - name: Download sources
+      # ================================================================
+      # Phase 2: Build (download + tools + toolchain + kernel + packages
+      #          + install + image — all in one step with V=s on failure)
+      # ================================================================
+      - name: Build firmware
         run: |
-          docker exec -u 0 -i DK bash -c '
-            set -euxo pipefail
-            cd /bld/openwrt
-            export FORCE_UNSAFE_CONFIGURE=1
-
-            for attempt in 1 2 3; do
-              echo "=== Download attempt $attempt/3 ==="
-              if make -j$(($(nproc) * 2)) download > /workspace/logs/01-download.log 2>&1; then
-                echo "=== Download completed successfully ==="
-                exit 0
-              fi
-              echo "=== Download attempt $attempt failed, retrying... ==="
-              sleep 10
-            done
-
-            echo "=== Download FAILED after 3 attempts, re-running with V=s ==="
-            make -j1 V=s download 2>&1 | tail -200
-            exit 1
-          '
-
-      # ----------------------------------------------------------------
-      # 8. Build host tools.
-      #    No V=s (massive speedup). On failure, show last 100 lines.
-      # ----------------------------------------------------------------
-      - name: Build host tools
-        run: |
-          docker exec -u 0 -i DK bash -c '
-            set -euxo pipefail
-            cd /bld/openwrt
-            export FORCE_UNSAFE_CONFIGURE=1
-            make -j$(($(nproc) * 2)) tools/install > /workspace/logs/02-tools.log 2>&1 || {
-              echo "=== Tools build FAILED, last 100 lines: ==="
-              tail -100 /workspace/logs/02-tools.log
-              exit 1
-            }
-            echo "=== Tools built successfully ==="
-          '
-
-      # ----------------------------------------------------------------
-      # 9. Build cross-compile toolchain.
-      #    This is the most expensive step on a cold cache (30-60 min).
-      #    With staging_dir persisted in the Docker image, subsequent
-      #    runs skip this entirely (make sees the stamps are up-to-date).
-      # ----------------------------------------------------------------
-      - name: Build cross-compile toolchain
-        run: |
-          docker exec -u 0 -i DK bash -c '
-            set -euxo pipefail
-            cd /bld/openwrt
-            export FORCE_UNSAFE_CONFIGURE=1
-            make -j$(($(nproc) * 2)) toolchain/install > /workspace/logs/03-toolchain.log 2>&1 || {
-              echo "=== Toolchain build FAILED, last 100 lines: ==="
-              tail -100 /workspace/logs/03-toolchain.log
-              exit 1
-            }
-            echo "=== Toolchain built successfully ==="
-          '
-
-      # ----------------------------------------------------------------
-      # 10. Configure ccache.
-      # ----------------------------------------------------------------
-      - name: Configure ccache
-        run: |
-          docker exec -u 0 -i DK bash -c '
-            set -euxo pipefail
-            export CCACHE_DIR=/ccache
-            export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
-            export CCACHE_NOHASHDIR=true
-            export CCACHE_COMPILERCHECK=content
-            ccache -M 5G
-            ccache -z
-            ccache -s
-          '
-
-      # ----------------------------------------------------------------
-      # 11. Compile kernel + modules.
-      # ----------------------------------------------------------------
-      - name: Compile kernel
-        run: |
-          docker exec -u 0 -i DK bash -c '
-            set -euxo pipefail
+          docker exec -u 0 -i DK bash -euxc '
             cd /bld/openwrt
             export FORCE_UNSAFE_CONFIGURE=1
             export CCACHE_DIR=/ccache
             export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
             export CCACHE_NOHASHDIR=true
             export CCACHE_COMPILERCHECK=content
-            make -j$(($(nproc) * 2)) target/linux/compile > /workspace/logs/04-kernel-compile.log 2>&1 || {
-              echo "=== Kernel compile FAILED, last 100 lines: ==="
-              tail -100 /workspace/logs/04-kernel-compile.log
+            ccache -M 5G; ccache -z
+
+            J="-j$(($(nproc) * 2))"
+            LOG=/workspace/logs
+
+            # --- Download ---
+            for a in 1 2 3; do
+              make $J download > $LOG/01-download.log 2>&1 && break
+              echo "Download attempt $a failed, retrying..."; sleep 10
+            done || { make -j1 V=s download 2>&1 | tail -200; exit 1; }
+
+            # --- Tools + Toolchain ---
+            make $J tools/install > $LOG/02-tools.log 2>&1 || { tail -100 $LOG/02-tools.log; exit 1; }
+            make $J toolchain/install > $LOG/03-toolchain.log 2>&1 || { tail -100 $LOG/03-toolchain.log; exit 1; }
+
+            # --- Kernel (forced rebuild for OC patch) ---
+            make $J target/linux/compile > $LOG/04-kernel.log 2>&1 || {
+              echo "=== Kernel FAILED, V=s diagnostics ==="
+              make -j1 V=s target/linux/compile 2>&1 | tail -300
               exit 1
             }
-            echo "=== Kernel compiled successfully ==="
-          '
 
-      # ----------------------------------------------------------------
-      # 12. Compile + install packages.
-      #     On failure, re-run with V=s to show the actual error.
-      # ----------------------------------------------------------------
-      - name: Compile packages
-        run: |
-          docker exec -u 0 -i DK bash -c '
-            set -euxo pipefail
-            cd /bld/openwrt
-            export FORCE_UNSAFE_CONFIGURE=1
-            export CCACHE_DIR=/ccache
-            export CCACHE_SLOPPINESS=file_stat_matches,include_file_mtime,time_macros
-            export CCACHE_NOHASHDIR=true
-            export CCACHE_COMPILERCHECK=content
-            make -j$(($(nproc) * 2)) package/compile > /workspace/logs/05-package-compile.log 2>&1 || {
-              echo "=== Package compile FAILED, re-running with V=s for diagnostics ==="
+            # --- Packages ---
+            make $J package/compile > $LOG/05-packages.log 2>&1 || {
+              echo "=== Package compile FAILED, V=s diagnostics ==="
               make -j1 V=s package/compile 2>&1 | tail -300
-              echo "=== Package compile FAILED, last 100 lines of original log: ==="
-              tail -100 /workspace/logs/05-package-compile.log
               exit 1
             }
-            make -j$(($(nproc) * 2)) target/compile >> /workspace/logs/05-package-compile.log 2>&1 || {
-              echo "=== Target compile FAILED, re-running with V=s for diagnostics ==="
+            make $J target/compile >> $LOG/05-packages.log 2>&1 || {
+              echo "=== Target compile FAILED, V=s diagnostics ==="
               make -j1 V=s target/compile 2>&1 | tail -300
-              echo "=== Target compile FAILED, last 100 lines of original log: ==="
-              tail -100 /workspace/logs/05-package-compile.log
               exit 1
             }
-            echo "=== Packages compiled successfully ==="
-          '
 
-      - name: Install packages
-        run: |
-          docker exec -u 0 -i DK bash -c '
-            set -euxo pipefail
-            cd /bld/openwrt
-            export FORCE_UNSAFE_CONFIGURE=1
-            make -j$(($(nproc) * 2)) package/install > /workspace/logs/06-package-install.log 2>&1 || {
-              echo "=== Package install FAILED, last 100 lines: ==="
-              tail -100 /workspace/logs/06-package-install.log
-              exit 1
-            }
-            make -j$(($(nproc) * 2)) target/install >> /workspace/logs/06-package-install.log 2>&1 || {
-              echo "=== Target install FAILED, last 100 lines: ==="
-              tail -100 /workspace/logs/06-package-install.log
-              exit 1
-            }
-            echo "=== Packages installed successfully ==="
-          '
+            # --- Install + Image ---
+            make $J package/install > $LOG/06-install.log 2>&1 || { tail -100 $LOG/06-install.log; exit 1; }
+            make $J target/install >> $LOG/06-install.log 2>&1 || { tail -100 $LOG/06-install.log; exit 1; }
 
-      # ----------------------------------------------------------------
-      # 13. Build firmware image.
-      #     In modern OpenWrt, the firmware image is generated by
-      #     `make target/install` (already done in the previous step).
-      #     `package/rootfs` does NOT exist as a make target in this
-      #     version (caused Run #21/#22 failures). We just verify the
-      #     image exists and print ccache stats.
-      # ----------------------------------------------------------------
-      - name: Build firmware image
-        run: |
-          docker exec -u 0 -i DK bash -c '
-            set -euxo pipefail
-            cd /bld/openwrt
-            export FORCE_UNSAFE_CONFIGURE=1
-
-            # Verify the firmware image was generated by target/install
-            IMG_DIR="bin/targets/airoha/an7581"
-            if ! ls "${IMG_DIR}"/*.itb 2>/dev/null | grep -q .; then
-              echo "=== ERROR: No firmware .itb found in ${IMG_DIR} ==="
-              echo "=== Re-running target/install with V=s for diagnostics ==="
-              make -j1 V=s target/install 2>&1 | tail -200
-              exit 1
-            fi
-            echo "=== Firmware image found ==="
-            ls -lh "${IMG_DIR}"/*.itb
-            echo "=== Firmware image built successfully ==="
-            export CCACHE_DIR=/ccache
+            # --- Verify image ---
+            ls -lh bin/targets/airoha/an7581/*.itb
+            echo "=== Build complete ==="
             ccache -s
           '
 
-      # ----------------------------------------------------------------
-      # 14. Collect artifacts.
-      # ----------------------------------------------------------------
-      - name: Collect artifacts
+      # ================================================================
+      # Phase 3: Publish (artifacts + release + save Docker image)
+      # ================================================================
+      - name: Collect & upload artifacts
         if: always()
         run: |
-          set -eux
-          sudo chown -R "$(id -u):$(id -g)" openwrt_bin ccache dlcache logs 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" openwrt_bin logs 2>/dev/null || true
           mkdir -p artifacts
-          {
-            echo "Build date: $(date -u)"
-            echo "Upstream repo: ${UPSTREAM_REPO}"
-            echo "Upstream branch: ${UPSTREAM_BRANCH}"
-            echo "Runner: $(uname -m)"
-          } > artifacts/BUILD_INFO.txt
           cp -v openwrt_bin/targets/airoha/an7581/*xr1710g* artifacts/ 2>/dev/null || true
           cp -v openwrt_bin/targets/airoha/an7581/*.manifest artifacts/ 2>/dev/null || true
-          if [ -d logs ] && ls logs/*.log >/dev/null 2>&1; then
-            mkdir -p artifacts/logs
-            cp -v logs/*.log artifacts/logs/ 2>/dev/null || true
-          fi
+          [ -d logs ] && { mkdir -p artifacts/logs; cp -v logs/*.log artifacts/logs/ 2>/dev/null || true; }
           ls -la artifacts/
 
-      # ----------------------------------------------------------------
-      # 15. Upload artifacts.
-      # ----------------------------------------------------------------
-      - name: Upload artifacts
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: xr1710g-yyh-oc-firmware-${{ github.run_id }}
           path: artifacts/
           if-no-files-found: warn
           retention-days: 30
 
-      # ----------------------------------------------------------------
-      # 16. Publish to GitHub Releases (only on success).
-      # ----------------------------------------------------------------
       - name: Publish to GitHub Releases
         if: success()
         run: |
           set -euxo pipefail
-          sudo chown -R "$(id -u):$(id -g)" openwrt_bin
           mkdir -p release-assets
           cp -v openwrt_bin/targets/airoha/an7581/*xr1710g*.itb release-assets/ 2>/dev/null || true
-          cp -v openwrt_bin/targets/airoha/an7581/*xr1710g*.bin release-assets/ 2>/dev/null || true
           cp -v openwrt_bin/targets/airoha/an7581/*.manifest release-assets/ 2>/dev/null || true
-          # Check if any firmware image exists (.itb or .bin)
-          if ! ls release-assets/*.itb 2>/dev/null | grep -q .; then
-            echo "ERROR: No .itb firmware image found"
-            exit 1
-          fi
-          echo "=== Firmware images to publish ==="
           ls -lh release-assets/
           TAG="xr1710g-yyh-oc-$(date -u '+%Y%m%d-%H%M%S')"
           gh release create "${TAG}" release-assets/* \
             --title "XR1710G-YYH-OC $(date -u '+%Y-%m-%d %H:%M')" \
-            --notes "ARM native build. Upload *.itb via LuCI > System > Backup/Flash Firmware."
+            --notes "ARM native build with OC + Argon + UPnP + v2ray-geo + WireGuard + i18n."
           echo "Release created: ${TAG}"
 
-      # ----------------------------------------------------------------
-      # 17. Save build state as Docker image for next run.
-      #     CRITICAL: Do NOT wipe build_dir or staging_dir!
-      #     These are the incremental build state that makes the next
-      #     run fast (skip toolchain + skip already-compiled packages).
-      #     Only wipe bin (symlink to volume), feeds (regenerated), tmp.
-      # ----------------------------------------------------------------
-      - name: Save build image
+      - name: Save Docker image
         if: always()
         run: |
-          set -eux
           docker exec DK bash -c 'cd /bld/openwrt 2>/dev/null && rm -rf bin feeds tmp' 2>/dev/null || true
           docker commit -a "xr1710g-yyh-oc-builder" -m "Build $(date -u '+%Y-%m-%d %H:%M')" DK "$IMG_INC"
           docker push "$IMG_INC" || true
-          echo "Build image saved (with staging_dir + build_dir for next run)"
+          echo "Docker image saved"
