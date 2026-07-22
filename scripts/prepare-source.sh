@@ -101,7 +101,9 @@ for pkg in luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manag
   # Also add if not present at all
   grep -q "CONFIG_PACKAGE_${pkg}" .config || echo "CONFIG_PACKAGE_${pkg}=y" >> .config
 done
-make olddefconfig
+# Use defconfig (not olddefconfig) because olddefconfig fails on
+# nftables-nojson recursive dependency. defconfig ignores it.
+make defconfig
 
 # ---- Force kernel rebuild to ensure OC patch takes effect ----
 # The OC patch modifies DTS files. If build_dir/linux-* has cached
