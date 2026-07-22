@@ -95,15 +95,12 @@ cp /workspace/config/xr1710g-oc.conf .config
 make defconfig
 
 # ---- Force enable i18n packages that defconfig may have dropped ----
-# These are needed for full Chinese language support
+# These are needed for full Chinese language support.
+# After sed, do NOT run make defconfig again — it would reset them.
 for pkg in luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manager-zh-cn luci-i18n-argon-zh-cn; do
   sed -i "s/^# CONFIG_PACKAGE_${pkg} is not set/CONFIG_PACKAGE_${pkg}=y/" .config
-  # Also add if not present at all
   grep -q "CONFIG_PACKAGE_${pkg}" .config || echo "CONFIG_PACKAGE_${pkg}=y" >> .config
 done
-# Use defconfig (not olddefconfig) because olddefconfig fails on
-# nftables-nojson recursive dependency. defconfig ignores it.
-make defconfig
 
 # ---- Force kernel rebuild to ensure OC patch takes effect ----
 # The OC patch modifies DTS files. If build_dir/linux-* has cached
