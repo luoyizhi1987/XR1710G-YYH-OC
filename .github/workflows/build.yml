@@ -24,6 +24,7 @@ jobs:
       UPSTREAM_BRANCH: "xr1710g-6.18-integration"
       GH_TOKEN: ${{ github.token }}
       IMG_INC: ghcr.io/${{ github.repository_owner }}/xr1710g-yyh-oc:latest
+      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
     steps:
       - uses: actions/checkout@v4
