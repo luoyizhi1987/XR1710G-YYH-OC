@@ -33,8 +33,18 @@ ln -sf /dlcache dl
 echo "=== Step 2: feeds update ==="
 
 # ---- Update feeds with --force to get latest code ----
-# This ensures feed packages are up-to-date even if upstream hasn't updated.
 ./scripts/feeds update -a -f
+
+# ---- Force each feed to absolute latest commit ----
+# Docker image may cache old feed clones. feeds update -f might not
+# always reset to the newest commit. Explicitly git pull each feed.
+for feed_dir in feeds/packages feeds/luci feeds/routing feeds/telephony feeds/video; do
+  if [ -d "$feed_dir/.git" ]; then
+    echo ">>> Force updating $feed_dir to latest HEAD"
+    ( cd "$feed_dir" && git fetch origin && git reset --hard origin/HEAD && git clean -fd ) 2>&1 || true
+  fi
+done
+echo ">>> All feeds force-updated to latest."
 
 echo "=== Step 3: applying patches ==="
 
