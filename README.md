@@ -22,9 +22,8 @@ branch, with three customisations applied on top:
    * Drop `luci-theme-glass` and its i18n packs (disabled in `.config`).
    * Add `luci-theme-argon` + `luci-i18n-argon-zh-cn` as the default theme.
    * Add `luci-app-upnp` + `luci-i18n-upnp-zh-cn` + `miniupnpd-nftables`.
-   * Add `v2ray-geoip` + `v2ray-geosite`.
    See [`patches/003-drop-glass-add-argon-theme.patch`](patches/003-drop-glass-add-argon-theme.patch)
-   and [`patches/004-add-upnp-v2ray-geo-packages.patch`](patches/004-add-upnp-v2ray-geo-packages.patch).
+   and [`patches/004-add-upnp-packages.patch`](patches/004-add-upnp-packages.patch).
 
 4. **Build-system fixes that keep full firmware functionality**:
    * `patches/005-kernel-olddefconfig-resolve-new-symbols.patch` — runs
@@ -92,7 +91,7 @@ only** (`workflow_dispatch`). Each run:
 │   ├── 001-txpower-30dbm-5ghz-unii1.patch
 │   ├── 002-oc-overclock-200mhz-performance-governor.patch
 │   ├── 003-drop-glass-add-argon-theme.patch
-│   ├── 004-add-upnp-v2ray-geo-packages.patch
+│   ├── 004-add-upnp-packages.patch
 │   ├── 005-kernel-olddefconfig-resolve-new-symbols.patch
 │   └── 006-add-argon-theme-feed.patch
 ├── scripts/

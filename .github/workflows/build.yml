@@ -192,7 +192,7 @@ jobs:
           TAG="xr1710g-yyh-oc-$(date -u '+%Y%m%d-%H%M%S')"
           gh release create "${TAG}" release-assets/* \
             --title "XR1710G-YYH-OC $(date -u '+%Y-%m-%d %H:%M')" \
-            --notes "ARM native build with OC + Argon + UPnP + v2ray-geo + WireGuard + i18n."
+            --notes "ARM native build with OC + Argon + UPnP + WireGuard + i18n."
           echo "Release created: ${TAG}"
 
       - name: Delete old releases

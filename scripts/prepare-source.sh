@@ -77,7 +77,7 @@ echo "=== Step 5: feeds install ==="
 # ---- Install all feeds ----
 ./scripts/feeds install -a
 
-echo "=== Step 5.5: install luci-app-daed (dae eBPF proxy + LuCI UI) ==="
+echo "=== Step 5.5: install luci-app-daed ==="
 
 # Clone the luci-app-daed overlay into package/dae/. The OpenWrt build
 # system auto-discovers package/<dir>/<name>/Makefile pairs, so this
@@ -120,18 +120,7 @@ else
 fi
 grep -nE 'vmlinux-btf' package/dae/daed/Makefile || echo "    (no vmlinux-btf references left in daed/Makefile)"
 
-echo "=== Step 6: v2ray-geodata fix ==="
-
-# ---- Fix v2ray-geodata Makefile (patch 007 via sed) ----
-V2RAY_MAKEFILE="feeds/packages/net/v2ray-geodata/Makefile"
-if [ -f "$V2RAY_MAKEFILE" ]; then
-  sed -i 's/^GEOIP_VER:=.*/GEOIP_VER:=202607171233/' "$V2RAY_MAKEFILE"
-  sed -i 's/^GEOSITE_VER:=.*/GEOSITE_VER:=20260721085449/' "$V2RAY_MAKEFILE"
-  sed -i 's/^  HASH:=e9002979e0df72bce1c8751ff70725386594c551db684b7a232935b8b2bb8aa2/  HASH:=b71d1999439dde2de2d2b6844a2befa50c50211ff739785c005ca7c230a17d6a/' "$V2RAY_MAKEFILE"
-  sed -i 's/^  HASH:=330e9383df4b232747d900c70ff1718d396e0fff4914930285c24657e7f013a1/  HASH:=4474555a11e03d86f7677a043ce717ac096e9f998a7d66e90fc7a1065ee0ab8a/' "$V2RAY_MAKEFILE"
-fi
-
-echo "=== Step 7: configure ==="
+echo "=== Step 6: configure ==="
 
 # ---- Configure ----
 cp /workspace/config/xr1710g-oc.conf .config
@@ -149,7 +138,7 @@ done
 # The OC patch modifies DTS files. If build_dir/linux-* has cached
 # compiled kernel objects from a previous run, make won't rebuild.
 # Delete the kernel build cache to force a full kernel recompile.
-echo "=== Step 8: forcing kernel rebuild for OC patch ==="
+echo "=== Step 7: forcing kernel rebuild for OC patch ==="
 rm -rf build_dir/linux-*
 rm -rf build_dir/target-linux-* 2>/dev/null || true
 # Also clean kernel stamps in tmp/
