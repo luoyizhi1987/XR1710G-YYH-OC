@@ -77,6 +77,29 @@ echo "=== Step 5: feeds install ==="
 # ---- Install all feeds ----
 ./scripts/feeds install -a
 
+echo "=== Step 5.5: install luci-app-daed (dae eBPF proxy + LuCI UI) ==="
+
+# Clone the luci-app-daed overlay into package/dae/. The OpenWrt build
+# system auto-discovers package/<dir>/<name>/Makefile pairs, so this
+# adds two sub-packages:
+#   - package/dae/daed/Makefile         -> Package/daed
+#   - package/dae/luci-app-daed/Makefile -> Package/luci-app-daed
+# Both are enabled via CONFIG_PACKAGE_{daed,luci-app-daed}=y in
+# config/xr1710g-oc.conf. See daed/Makefile for the upstream build
+# requirements (Node.js v24 + pnpm, Go, Clang, llvm) — all downloaded
+# at Build/Prepare time from inside the daed package itself.
+if [ ! -d package/dae ]; then
+    git clone --depth=1 https://github.com/QiuSimons/luci-app-daed package/dae
+    # Verify both sub-package Makefiles landed
+    test -f package/dae/daed/Makefile || { echo "FATAL: daed/Makefile missing after clone"; exit 1; }
+    test -f package/dae/luci-app-daed/Makefile || { echo "FATAL: luci-app-daed/Makefile missing after clone"; exit 1; }
+    echo "=== luci-app-daed cloned into package/dae/ ==="
+else
+    # Incremental build: refresh the clone (depth=1 keeps it small).
+    ( cd package/dae && git fetch --depth=1 origin && git reset --hard origin/HEAD )
+    echo "=== luci-app-daed refreshed in package/dae/ ==="
+fi
+
 echo "=== Step 6: v2ray-geodata fix ==="
 
 # ---- Fix v2ray-geodata Makefile (patch 007 via sed) ----
@@ -114,9 +137,12 @@ rm -f tmp/.target-linux-compile 2>/dev/null || true
 rm -f tmp/.packageinfo-linux 2>/dev/null || true
 
 echo "=== Key config selections ==="
-grep -E '^CONFIG_TARGET|^CONFIG_PACKAGE_luci-theme-argon|^CONFIG_PACKAGE_luci-i18n|CONFIG_CPU_FREQ|CONFIG_CCACHE' .config || true
+grep -E '^CONFIG_TARGET|^CONFIG_PACKAGE_luci-theme-argon|^CONFIG_PACKAGE_luci-i18n|CONFIG_CPU_FREQ|CONFIG_CCACHE|CONFIG_(PACKAGE_)?DAED' .config || true
 
 echo "=== Verify i18n packages ==="
 grep -E 'luci-i18n.*zh-cn' .config || true
+
+echo "=== Verify daed packages ==="
+grep -E '^CONFIG_(PACKAGE_)?(daed|luci-app-daed|kmod-sched-core|kmod-sched-bpf|kmod-veth)' .config || true
 
 echo "=== Prepare OpenWrt source DONE ==="
