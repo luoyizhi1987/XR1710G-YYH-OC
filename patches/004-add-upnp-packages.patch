@@ -11,7 +11,7 @@ pulled into the image by default:
 ---
 --- a/target/linux/airoha/image/an7581.mk
 +++ b/target/linux/airoha/image/an7581.mk
-@@ -140,12 +140,13 @@
+@@ -140,9 +140,10 @@
 		    kmod-i2c-an7581 kmod-hwmon-nct7802 \
 		    kmod-mt7996-firmware kmod-phy-realtek rtl826x-firmware \
 		    luci \
@@ -23,8 +23,5 @@ pulled into the image by default:
 		    luci-mod-admin-full \
 		    luci-proto-ppp luci-theme-bootstrap \
 		    luci-theme-argon luci-i18n-argon-zh-cn \
-		    rpcd-mod-rrdns uhttpd uhttpd-mod-ubus \
-		    wpad-basic-mbedtls
-  UBINIZE_OPTS := -E 5
 -- 
 2.43.0
