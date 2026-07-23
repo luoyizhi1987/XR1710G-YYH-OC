@@ -6,7 +6,7 @@ on:
       clean_cache:
         description: "Wipe ccache/dl and rebuild toolchain from scratch"
         required: false
-        default: "false"
+        default: "true"
         type: choice
         options:
           - "false"
@@ -26,6 +26,17 @@ jobs:
       IMG_INC: ghcr.io/${{ github.repository_owner }}/xr1710g-yyh-oc:latest
 
     steps:
+      - name: Clear all caches
+        run: |
+          set +e
+          for id in $(gh cache list --json id --jq '.[].id' 2>/dev/null); do
+            gh cache delete "$id" --confirm 2>/dev/null || true
+          done
+          echo "All caches cleared."
+
+      - name: Wipe local ccache/dl
+        run: rm -rf ccache dlcache && mkdir -p ccache dlcache openwrt_bin logs
+
       - uses: actions/checkout@v7
 
       - uses: docker/login-action@v4
@@ -44,9 +55,6 @@ jobs:
           restore-keys: |
             openwrt-ccache-dl-
 
-      - name: Wipe caches (optional)
-        if: github.event.inputs.clean_cache == 'true'
-        run: rm -rf ccache dlcache && mkdir -p ccache dlcache openwrt_bin logs
 
       - name: Start container
         run: |
@@ -186,6 +194,18 @@ jobs:
             --title "XR1710G-YYH-OC $(date -u '+%Y-%m-%d %H:%M')" \
             --notes "ARM native build with OC + Argon + UPnP + v2ray-geo + WireGuard + i18n."
           echo "Release created: ${TAG}"
+
+      - name: Delete old releases
+        if: success()
+        run: |
+          set +e
+          CURRENT_TAG="$(gh release list --limit 1 --json tagName --jq '.[0].tagName')"
+          for tag in $(gh release list --json tagName --jq '.[].tagName' 2>/dev/null); do
+            [ "$tag" = "$CURRENT_TAG" ] && continue
+            echo "Deleting old release: $tag"
+            gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          done
+          echo "Old releases cleaned up."
 
       - name: Save Docker image
         if: always()
