@@ -123,10 +123,24 @@ fi
 # with plain `apk add .../*.apk` (no --force-deps required).
 echo "=== Stripping vmlinux-btf dep from daed/Makefile (apk mode, kernel BTF used) ==="
 if grep -q 'DAED_USE_VMLINUX_BTF:vmlinux-btf' package/dae/daed/Makefile; then
+    # Remove the vmlinux-btf dependency and fix the trailing backslash
     sed -i '/DAED_USE_VMLINUX_BTF:vmlinux-btf/d' package/dae/daed/Makefile
-    echo "    OK — removed conditional vmlinux-btf dep"
+    # Fix: the line before the removed one may still have a trailing backslash
+    sed -i '/+@KERNEL_XDP_SOCKETS/{s/ \\$//}' package/dae/daed/Makefile
+    echo "    OK — removed vmlinux-btf dep and fixed continuation"
 else
     echo "    SKIP — line not present (already stripped or upstream changed)"
+fi
+
+# --- Remove v2ray-geoip/geosite deps (removed from this build) ---
+if grep -q 'v2ray-geoip\|v2ray-geosite' package/dae/daed/Makefile; then
+    sed -i 's/+v2ray-geoip \*//' package/dae/daed/Makefile
+    sed -i 's/+v2ray-geosite \*//' package/dae/daed/Makefile
+    sed -i 's/+v2ray-geoip//' package/dae/daed/Makefile
+    sed -i 's/+v2ray-geosite//' package/dae/daed/Makefile
+    echo "    OK — removed v2ray-geoip/geosite deps"
+else
+    echo "    SKIP — no v2ray deps found"
 fi
 grep -nE 'vmlinux-btf' package/dae/daed/Makefile || echo "    (no vmlinux-btf references left in daed/Makefile)"
 
