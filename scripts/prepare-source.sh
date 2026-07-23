@@ -100,6 +100,26 @@ else
     echo "=== luci-app-daed refreshed in package/dae/ ==="
 fi
 
+# --- Strip the vmlinux-btf conditional dependency from daed/Makefile ---
+# OpenWrt 23.05+ uses apk (.apk packages, not .ipk). The daed package's
+# Makefile declares:
+#   DEPENDS:=... +DAED_USE_VMLINUX_BTF:vmlinux-btf
+# That conditional dep ends up in the .apk manifest, so installing the
+# daed .apk with `apk add` would refuse (or pull in vmlinux-btf) even
+# though we explicitly chose DAED_USE_KERNEL_BTF in .config and the
+# kernel has built-in BTF support (CONFIG_KERNEL_DEBUG_INFO_BTF=y).
+# We never need vmlinux-btf on this build, so unconditionally remove
+# that line — the .apk becomes self-contained and installs cleanly
+# with plain `apk add .../*.apk` (no --force-deps required).
+echo "=== Stripping vmlinux-btf dep from daed/Makefile (apk mode, kernel BTF used) ==="
+if grep -q '^+DAED_USE_VMLINUX_BTF:vmlinux-btf' package/dae/daed/Makefile; then
+    sed -i '/^+DAED_USE_VMLINUX_BTF:vmlinux-btf/d' package/dae/daed/Makefile
+    echo "    OK — removed conditional vmlinux-btf dep"
+else
+    echo "    SKIP — line not present (already stripped or upstream changed)"
+fi
+grep -nE 'vmlinux-btf' package/dae/daed/Makefile || echo "    (no vmlinux-btf references left in daed/Makefile)"
+
 echo "=== Step 6: v2ray-geodata fix ==="
 
 # ---- Fix v2ray-geodata Makefile (patch 007 via sed) ----
