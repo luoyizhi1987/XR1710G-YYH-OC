@@ -122,8 +122,8 @@ fi
 # that line — the .apk becomes self-contained and installs cleanly
 # with plain `apk add .../*.apk` (no --force-deps required).
 echo "=== Stripping vmlinux-btf dep from daed/Makefile (apk mode, kernel BTF used) ==="
-if grep -q '^+DAED_USE_VMLINUX_BTF:vmlinux-btf' package/dae/daed/Makefile; then
-    sed -i '/^+DAED_USE_VMLINUX_BTF:vmlinux-btf/d' package/dae/daed/Makefile
+if grep -q 'DAED_USE_VMLINUX_BTF:vmlinux-btf' package/dae/daed/Makefile; then
+    sed -i '/DAED_USE_VMLINUX_BTF:vmlinux-btf/d' package/dae/daed/Makefile
     echo "    OK — removed conditional vmlinux-btf dep"
 else
     echo "    SKIP — line not present (already stripped or upstream changed)"
@@ -143,6 +143,9 @@ for pkg in luci-i18n-base-zh-cn luci-i18n-firewall-zh-cn luci-i18n-package-manag
   sed -i "s/^# CONFIG_PACKAGE_${pkg} is not set/CONFIG_PACKAGE_${pkg}=y/" .config
   grep -q "CONFIG_PACKAGE_${pkg}" .config || echo "CONFIG_PACKAGE_${pkg}=y" >> .config
 done
+
+# ---- Ensure vmlinux-btf is NOT selected (use kernel BTF instead) ----
+sed -i 's/^CONFIG_DAED_USE_VMLINUX_BTF=y/# CONFIG_DAED_USE_VMLINUX_BTF is not set/' .config
 
 # ---- Force kernel rebuild to ensure OC patch takes effect ----
 # The OC patch modifies DTS files. If build_dir/linux-* has cached
