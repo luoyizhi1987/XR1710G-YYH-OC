@@ -144,6 +144,22 @@ else
 fi
 grep -nE 'vmlinux-btf' package/dae/daed/Makefile || echo "    (no vmlinux-btf references left in daed/Makefile)"
 
+# --- Fix Node.js architecture for ARM builds ---
+# daed Makefile hardcodes linux-x64 for Node.js download. On ARM runners
+# this downloads an x64 binary that won't run. Fix to match host arch.
+ARCH=$(uname -m)
+case "$ARCH" in
+  aarch64|arm64) NODE_ARCH=arm64 ;;
+  x86_64)        NODE_ARCH=x64 ;;
+  *)             NODE_ARCH=$ARCH ;;
+esac
+if grep -q 'linux-x64' package/dae/daed/Makefile; then
+    sed -i "s/linux-x64/linux-${NODE_ARCH}/g" package/dae/daed/Makefile
+    echo "    OK — fixed Node.js arch: linux-x64 -> linux-${NODE_ARCH}"
+else
+    echo "    SKIP — Node.js arch already correct or changed"
+fi
+
 echo "=== Step 6: configure ==="
 
 # ---- Configure ----
